@@ -90,6 +90,9 @@ jobs:
     if: needs.scan.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    concurrency:
+      group: run-on-public-repo-${{ inputs.target_repository }}-${{ matrix.issue_number }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -153,7 +156,7 @@ jobs:
     - name: Checkout ai-factory
       uses: actions/checkout@v4
       with:
-        repository: liyuerich/ai-factory
+        repository: Verdure-oss/ai-factory
         ref: main
         path: factory
 
@@ -355,6 +358,21 @@ jobs:
 
         kubectl get factorytask "${TASK_NAME}" -n default -o yaml
 
+        # Ensure lifecycle labels exist
+        gh label create ai-factory-running --repo "${TARGET_REPO}" --color 1D76DB --description "ai-factory is processing this issue" --force >/dev/null 2>&1 || true
+        gh label create ai-factory-done --repo "${TARGET_REPO}" --color 0E8A16 --description "ai-factory completed this issue" --force >/dev/null 2>&1 || true
+        gh label create ai-factory-failed --repo "${TARGET_REPO}" --color B60205 --description "ai-factory failed this issue" --force >/dev/null 2>&1 || true
+
+        # Mark issue as running
+        gh issue edit "${ISSUE_NUMBER}" --repo "${TARGET_REPO}" \
+          --add-label ai-factory-running \
+          --remove-label ai-factory-done \
+          --remove-label ai-factory-failed || true
+
+        RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        COMMENT_BODY=$(printf 'ai-factory started processing this issue.\n\n- FactoryTask: %s\n- GitHub Actions run: %s' "${TASK_NAME}" "${RUN_URL}")
+        gh issue comment "${ISSUE_NUMBER}" --repo "${TARGET_REPO}" --body "${COMMENT_BODY}"
+
         go run ./factory/cmd/factory task controller watch \
           -n default \
           --once \
@@ -393,6 +411,13 @@ jobs:
         TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
+        # Update lifecycle labels
+        gh issue edit "${ISSUE_NUMBER}" --repo "${TARGET_REPO}" \
+          --add-label ai-factory-done \
+          --remove-label ai-factory-running \
+          --remove-label ai-factory-failed \
+          --remove-label ai-factory-run || true
+
         LAST_RESULT_URL="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastResultURL}' 2>/dev/null || true)"
         LAST_MESSAGE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastMessage}' 2>/dev/null || true)"
 
@@ -416,6 +441,13 @@ jobs:
         TASK_REPOSITORY="$(printf '%s' "${TARGET_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
         TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+        # Update lifecycle labels
+        gh label create ai-factory-failed --repo "${TARGET_REPO}" --color B60205 --description "ai-factory failed this issue" --force >/dev/null 2>&1 || true
+        gh issue edit "${ISSUE_NUMBER}" --repo "${TARGET_REPO}" \
+          --add-label ai-factory-failed \
+          --remove-label ai-factory-running \
+          --remove-label ai-factory-done || true
 
         PHASE=""
         REASON=""
