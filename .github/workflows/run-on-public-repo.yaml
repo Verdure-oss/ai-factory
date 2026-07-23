@@ -274,7 +274,7 @@ jobs:
         CHANGE_REQUEST=false
         AGENT_CMD="cat >/tmp/ai-factory-agent-prompt.txt"
         AGENT_ENV_ARGS=()
-        TASK_COMMAND="test -s /tmp/ai-factory-agent-prompt.txt && test -f factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
+        TASK_COMMAND="test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
         RESULT_EXPECTATION="FactoryTask to succeed"
 
         TRIGGER_LABEL="${{ steps.fetch-issue.outputs.trigger_label }}"
@@ -416,7 +416,8 @@ jobs:
           --add-label ai-factory-done \
           --remove-label ai-factory-running \
           --remove-label ai-factory-failed \
-          --remove-label ai-factory-run || true
+          --remove-label ai-factory-run \
+          --remove-label ai-factory-smoke || true
 
         LAST_RESULT_URL="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastResultURL}' 2>/dev/null || true)"
         LAST_MESSAGE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastMessage}' 2>/dev/null || true)"
