@@ -21,10 +21,6 @@ on:
         description: "Target repository in owner/repo format (e.g. kubernetes/kubernetes)"
         required: true
         type: string
-      issue_number:
-        description: "Issue number in the target repository"
-        required: true
-        type: number
       base_ref:
         description: "Branch or ref to checkout from the target repository"
         required: false
@@ -46,12 +42,62 @@ permissions:
   issues: read
 
 jobs:
-  run-on-public-repo:
+  # ── Job 1: Scan for matching issues ──────────────────────────────
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
+    outputs:
+      issues: ${{ steps.discover.outputs.issues }}
+      count: ${{ steps.discover.outputs.count }}
     env:
       TARGET_REPO: ${{ inputs.target_repository }}
-      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+    steps:
+    - name: Validate PAT token
+      run: |
+        if [[ -z "${GH_TOKEN}" ]]; then
+          echo "::error::PAT_TOKEN secret is not configured."
+          exit 1
+        fi
+
+    - name: Discover matching issues
+      id: discover
+      run: |
+        echo "Scanning open issues in ${TARGET_REPO} with ai-factory labels..."
+
+        ISSUES_JSON=$(gh api "repos/${TARGET_REPO}/issues" \
+          --method GET \
+          -f state=open \
+          -f per_page=100 \
+          --jq '[.[] | select(
+            (.labels | map(.name) | any(. == "ai-factory")) and
+            (.labels | map(.name) | any(. == "ai-factory-run") or any(. == "ai-factory-smoke"))
+          ) | .number]')
+
+        COUNT=$(echo "$ISSUES_JSON" | jq 'length')
+        echo "Found ${COUNT} matching issues: ${ISSUES_JSON}"
+
+        echo "issues=${ISSUES_JSON}" >> "$GITHUB_OUTPUT"
+        echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+        if [[ "${COUNT}" == "0" ]]; then
+          echo "::warning::No matching issues found. Issues need both 'ai-factory' and 'ai-factory-run'/'ai-factory-smoke' labels."
+        fi
+
+  # ── Job 2: Process each issue ────────────────────────────────────
+  run:
+    needs: scan
+    if: needs.scan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        issue_number: ${{ fromJson(needs.scan.outputs.issues) }}
+    env:
+      TARGET_REPO: ${{ inputs.target_repository }}
+      ISSUE_NUMBER: ${{ matrix.issue_number }}
       BASE_REF: ${{ inputs.base_ref }}
       AGENT_COMMAND: ${{ inputs.agent_command }}
       VALIDATION_COMMAND: ${{ inputs.validation_command }}
@@ -61,13 +107,6 @@ jobs:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
 
     steps:
-    - name: Validate PAT token
-      run: |
-        if [[ -z "${GH_TOKEN}" ]]; then
-          echo "::error::PAT_TOKEN secret is not configured. Please add a Personal Access Token with 'public_repo' and 'issues:write' scope."
-          exit 1
-        fi
-
     - name: Fetch and validate target issue
       id: fetch-issue
       run: |
@@ -93,16 +132,6 @@ jobs:
 
         if [[ "$STATE" != "open" ]]; then
           echo "::warning::Issue #${ISSUE_NUMBER} is not open (state: ${STATE}). Proceeding anyway."
-        fi
-
-        if ! echo "$LABELS" | grep -q "ai-factory"; then
-          echo "::error::Issue #${ISSUE_NUMBER} does not have the 'ai-factory' label. Labels: ${LABELS}"
-          exit 1
-        fi
-
-        if ! echo "$LABELS" | grep -qE "ai-factory-run|ai-factory-smoke"; then
-          echo "::error::Issue #${ISSUE_NUMBER} does not have 'ai-factory-run' or 'ai-factory-smoke' label. Labels: ${LABELS}"
-          exit 1
         fi
 
         if echo "$LABELS" | grep -q "ai-factory-smoke"; then
@@ -140,7 +169,7 @@ jobs:
       shell: bash
 
     - name: OpenAI-compatible agent configuration preflight
-      if: contains(env.AGENT_COMMAND, 'openai-compatible')
+      if: contains(env.AGENT_COMMAND, 'openai-compatible') && steps.fetch-issue.outputs.trigger_label == 'ai-factory-run'
       env:
         OPENAI_API_KEY: ${{ secrets.AI_FACTORY_OPENAI_API_KEY }}
         OPENAI_BASE_URL: ${{ vars.AI_FACTORY_OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
