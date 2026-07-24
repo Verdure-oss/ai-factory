@@ -476,11 +476,51 @@ jobs:
           fi
         fi
 
+    - name: Create PR from fork to upstream
+      if: success()
+      run: |
+        RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+        # Check if PR already exists
+        EXISTING_PR=$(gh pr list --repo "${TARGET_REPO}" \
+          --head "${FORK_OWNER}:${BRANCH_NAME}" \
+          --state open \
+          --json number --jq 'length')
+
+        if [[ "$EXISTING_PR" -gt 0 ]]; then
+          echo "PR already exists for ${FORK_OWNER}:${BRANCH_NAME}, skipping."
+        else
+          # Check if the branch exists on the fork (change-request flow should have pushed it)
+          if gh api "repos/${FORK_REPO}/branches/${BRANCH_NAME}" >/dev/null 2>&1; then
+            echo "Creating PR from ${FORK_OWNER}:${BRANCH_NAME} to ${TARGET_REPO}:${BASE_REF}..."
+            gh pr create \
+              --repo "${TARGET_REPO}" \
+              --head "${FORK_OWNER}:${BRANCH_NAME}" \
+              --base "${BASE_REF}" \
+              --title "ai-factory: fix issue #${ISSUE_NUMBER}" \
+              --body "$(cat <<EOF
+        ## ai-factory automated fix
+
+        Resolves #${ISSUE_NUMBER}
+
+        - **Actions run:** ${RUN_URL}
+        - **Trigger:** \`${{ steps.fetch-issue.outputs.trigger_label }}\`
+        - **Fork:** ${FORK_REPO}
+
+        ---
+        *This PR was generated automatically by [ai-factory](https://github.com/Verdure-oss/ai-factory).*
+        EOF
+        )"
+            echo "PR created successfully."
+          else
+            echo "::warning::Branch ${BRANCH_NAME} not found on ${FORK_REPO}. Change-request flow may not have pushed changes."
+          fi
+        fi
+
     - name: Comment on target issue
       if: success()
       run: |
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-        PR_URL="https://github.com/${FORK_REPO}/pulls?q=is%3Apr+ai-factory-${ISSUE_NUMBER}"
 
         COMMENT_BODY="## ai-factory result: Succeeded\n\n"
         COMMENT_BODY+="- **Target:** \`${TARGET_REPO}\` #${ISSUE_NUMBER}\n"
