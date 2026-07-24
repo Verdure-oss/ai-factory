@@ -124,7 +124,8 @@ jobs:
         echo "Total issues to process: ${TOTAL}"
         echo "${ALL_ISSUES}" | jq '.'
 
-        echo "matrix=${ALL_ISSUES}" >> "$GITHUB_OUTPUT"
+        # Use compact JSON for GITHUB_OUTPUT (no newlines)
+        echo "matrix=$(echo "$ALL_ISSUES" | jq -c '.')" >> "$GITHUB_OUTPUT"
         echo "count=${TOTAL}" >> "$GITHUB_OUTPUT"
 
   # ── Job 2: Fork, process, and create PR for each issue ───────────
