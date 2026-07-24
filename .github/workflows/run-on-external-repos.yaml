@@ -202,9 +202,12 @@ jobs:
         # Check if fork already exists
         if gh api "repos/${FORK_REPO}" >/dev/null 2>&1; then
           echo "Fork ${FORK_REPO} already exists."
+          # Sync fork with upstream if behind
+          echo "Syncing fork with upstream..."
+          gh api "repos/${FORK_REPO}/merge-upstream" --method POST -f branch="${BASE_REF}" 2>/dev/null || echo "Fork is up to date or sync not needed."
         else
           echo "Creating fork for ${TARGET_REPO}..."
-          gh api "repos/${TARGET_REPO}/forks" --method POST -f default_branch_only=true
+          gh repo fork "${TARGET_REPO}" --default-branch-only
           # Wait for fork to be ready
           for _ in $(seq 1 30); do
             if gh api "repos/${FORK_REPO}" >/dev/null 2>&1; then
@@ -214,10 +217,6 @@ jobs:
             sleep 2
           done
         fi
-
-        # Sync fork with upstream if behind
-        echo "Syncing fork with upstream..."
-        gh api "repos/${FORK_REPO}/merge-upstream" --method POST -f branch="${BASE_REF}" 2>/dev/null || echo "Fork is up to date or sync not needed."
 
     - name: Checkout fork
       uses: actions/checkout@v4
