@@ -103,7 +103,7 @@ jobs:
               # Check if PR already exists from our fork
               EXISTING=$(gh api "repos/${REPO}/pulls" \
                 --method GET \
-                -f state=all \
+                -f state=open \
                 -f per_page=100 \
                 --jq "[.[] | select(.head.ref == \"${BRANCH_NAME}\" and .head.repo.owner.login == \"${FORK_OWNER}\")] | length" 2>/dev/null || echo "0")
 
