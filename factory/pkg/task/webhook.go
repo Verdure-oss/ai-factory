@@ -50,6 +50,7 @@ type IssueWebhookOptions struct {
 	RequiredLabels            []string
 	Repositories              []string
 	ChangeRequestEnabled      bool
+	ChangeRequestPushOnly     bool
 	ChangeRequestAuthTokenEnv string
 }
 
@@ -155,6 +156,7 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 	if opts.ChangeRequestEnabled {
 		task.Spec.ChangeRequest = ChangeRequestSpec{
 			Enabled:       true,
+			PushOnly:      opts.ChangeRequestPushOnly,
 			BranchPrefix:  "factory-task",
 			CommitMessage: fmt.Sprintf("Apply issue #%d: %s", event.IssueNumber, event.IssueTitle),
 			Title:         event.IssueTitle,

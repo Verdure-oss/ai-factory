@@ -106,6 +106,7 @@ type WorkSpec struct {
 // ChangeRequestSpec describes branch, commit, and push behavior for code changes.
 type ChangeRequestSpec struct {
 	Enabled       bool   `yaml:"enabled,omitempty"`
+	PushOnly      bool   `yaml:"pushOnly,omitempty"`
 	BranchName    string `yaml:"branchName,omitempty"`
 	BranchPrefix  string `yaml:"branchPrefix,omitempty"`
 	TargetBranch  string `yaml:"targetBranch,omitempty"`

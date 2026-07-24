@@ -268,6 +268,7 @@ var webhookOptions struct {
 	requireLabel              []string
 	repository                []string
 	changeRequest             bool
+	changeRequestPushOnly     bool
 	changeRequestAuthTokenEnv string
 }
 
@@ -489,6 +490,7 @@ func init() {
 	webhookCmd.PersistentFlags().StringArrayVar(&webhookOptions.requireLabel, "require-label", nil, "issue label required to trigger a FactoryTask; can be repeated")
 	webhookCmd.PersistentFlags().StringArrayVar(&webhookOptions.repository, "repository", nil, "repository allowed to trigger FactoryTasks; can be repeated")
 	webhookCmd.PersistentFlags().BoolVar(&webhookOptions.changeRequest, "change-request", true, "enable branch, commit, push, and PR/MR creation for generated FactoryTasks")
+	webhookCmd.PersistentFlags().BoolVar(&webhookOptions.changeRequestPushOnly, "change-request-push-only", false, "push changes but skip PR/MR creation (requires --change-request=true)")
 	webhookCmd.PersistentFlags().StringVar(&webhookOptions.changeRequestAuthTokenEnv, "change-request-auth-token-env", "", "environment variable name for git push and PR/MR creation token")
 	webhookRenderCmd.Flags().StringVar(&webhookOptions.provider, "provider", taskpkg.ProviderGitHub, "webhook provider: github or gitlab")
 	webhookServeCmd.Flags().StringVar(&webhookServeOptions.addr, "addr", ":8080", "listen address")
@@ -561,6 +563,7 @@ func issueWebhookOptions() taskpkg.IssueWebhookOptions {
 		RequiredLabels:            webhookOptions.requireLabel,
 		Repositories:              webhookOptions.repository,
 		ChangeRequestEnabled:      webhookOptions.changeRequest,
+		ChangeRequestPushOnly:     webhookOptions.changeRequestPushOnly,
 		ChangeRequestAuthTokenEnv: webhookOptions.changeRequestAuthTokenEnv,
 	}
 }
@@ -951,6 +954,9 @@ func changeRequestEnabled(controllerName string) bool {
 
 func createTaskChangeRequest(task *taskpkg.FactoryTask, enabled bool) (string, bool, error) {
 	if !enabled || !task.Spec.ChangeRequest.Enabled {
+		return "", false, nil
+	}
+	if task.Spec.ChangeRequest.PushOnly {
 		return "", false, nil
 	}
 	result, err := taskpkg.CreateChangeRequest(context.Background(), task, taskpkg.ChangeRequestOptions{})
