@@ -332,7 +332,7 @@ jobs:
 
     - name: Run FactoryTask
       env:
-        FACTORY_REPOSITORY: ${{ env.TARGET_REPO }}
+        FACTORY_REPOSITORY: ${{ env.FORK_REPO }}
         GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         AI_FACTORY_GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         OPENAI_API_KEY: ${{ secrets.AI_FACTORY_OPENAI_API_KEY }}
@@ -385,10 +385,10 @@ jobs:
           RESULT_EXPECTATION="an ai-factory-run change request URL or an existing PR status"
         fi
 
-        # Build webhook payload pointing to ORIGINAL repo
-        # Change-request flow will push to fork (via PAT) and create PR from fork to original
+        # Build webhook payload pointing to FORK
+        # Change-request flow pushes to fork; explicit step creates PR from fork to original
         gh api "repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}" > "${RUNNER_TEMP}/issue.json"
-        gh api "repos/${TARGET_REPO}" > "${RUNNER_TEMP}/repository.json"
+        gh api "repos/${FORK_REPO}" > "${RUNNER_TEMP}/repository.json"
         jq -n \
           --slurpfile issue "${RUNNER_TEMP}/issue.json" \
           --slurpfile repository "${RUNNER_TEMP}/repository.json" \
