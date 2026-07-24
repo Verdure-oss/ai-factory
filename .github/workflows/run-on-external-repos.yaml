@@ -423,6 +423,7 @@ jobs:
           "${AGENT_ENV_ARGS[@]}" \
           --command "${TASK_COMMAND}" \
           --change-request="${CHANGE_REQUEST}" \
+          --change-request-push-only \
           --change-request-auth-token-env AI_FACTORY_GITHUB_TOKEN \
           --reporting-mode comment \
           > "${RUNNER_TEMP}/webhook.log" 2>&1 &
