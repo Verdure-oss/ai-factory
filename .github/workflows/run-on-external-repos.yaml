@@ -98,8 +98,9 @@ jobs:
             FORK_OWNER="Verdure-oss"
             while IFS= read -r issue; do
               ISSUE_NUM=$(echo "$issue" | jq '.issue_number')
-              REPO_SLUG="$(printf '%s' "${REPO}" | tr '[:upper:]/_' '[:lower:]--')"
-              BRANCH_NAME="factory-task/${REPO_SLUG}-${ISSUE_NUM}"
+              REPO_NAME="${REPO#*/}"
+              FORK_SLUG="$(printf '%s' "${FORK_OWNER}/${REPO_NAME}" | tr '[:upper:]/_' '[:lower:]--')"
+              BRANCH_NAME="factory-task/github-${FORK_SLUG}-${ISSUE_NUM}"
 
               # Check if PR already exists from our fork
               EXISTING=$(gh api "repos/${REPO}/pulls" \
@@ -163,9 +164,9 @@ jobs:
       run: |
         # Extract repo name without owner (e.g. hermes-agent from jwz722733-blip/hermes-agent)
         REPO_NAME="${TARGET_REPO#*/}"
-        # Branch name follows change-request flow convention: factory-task/{repo}-{issue}
-        TASK_REPOSITORY="$(printf '%s' "${TARGET_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
-        BRANCH_NAME="factory-task/${TASK_REPOSITORY}-${ISSUE_NUMBER}"
+        # Branch name follows change-request flow convention: factory-task/github-{fork_repo}-{issue}
+        TASK_REPOSITORY="$(printf '%s' "${FORK_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
+        BRANCH_NAME="factory-task/github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
         echo "REPO_NAME=${REPO_NAME}" >> "$GITHUB_ENV"
         echo "FORK_REPO=${FORK_OWNER}/${REPO_NAME}" >> "$GITHUB_ENV"
         echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_ENV"
