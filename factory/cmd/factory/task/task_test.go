@@ -355,6 +355,7 @@ func TestGitLabPipelineTriggerHandler(t *testing.T) {
 		requireLabel              []string
 		repository                []string
 		changeRequest             bool
+		changeRequestPushOnly     bool
 		changeRequestAuthTokenEnv string
 	}{}
 	webhookTriggerPipelineOptions = struct {
