@@ -294,6 +294,7 @@ func TestIssueWebhookHandlerIgnoresMissingRequiredLabel(t *testing.T) {
 		requireLabel              []string
 		repository                []string
 		changeRequest             bool
+		changeRequestPushOnly     bool
 		changeRequestAuthTokenEnv string
 	}{
 		namespace:          "factory-system",
