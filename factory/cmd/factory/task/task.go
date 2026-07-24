@@ -973,7 +973,7 @@ func createTaskChangeRequest(task *taskpkg.FactoryTask, enabled bool) (string, b
 }
 
 func validateChangeRequestResult(task *taskpkg.FactoryTask, enabled bool, resultURL string, alreadyExists bool) error {
-	if !enabled || !task.Spec.ChangeRequest.Enabled || alreadyExists || strings.TrimSpace(resultURL) != "" {
+	if !enabled || !task.Spec.ChangeRequest.Enabled || task.Spec.ChangeRequest.PushOnly || alreadyExists || strings.TrimSpace(resultURL) != "" {
 		return nil
 	}
 	return fmt.Errorf("no change request created: provider returned no change request URL")

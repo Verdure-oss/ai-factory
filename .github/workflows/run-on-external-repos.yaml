@@ -468,15 +468,7 @@ jobs:
           echo "::error::FactoryTask did not succeed. Phase: ${TASK_PHASE:-<empty>}"
           exit 1
         fi
-        if [[ "${CHANGE_REQUEST}" == "true" ]]; then
-          LAST_RESULT_URL="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastResultURL}')"
-          LAST_MESSAGE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastMessage}')"
-          if [[ -z "${LAST_RESULT_URL}" && "${LAST_MESSAGE}" != *"Change request already exists"* ]]; then
-            kubectl get factorytask "${TASK_NAME}" -n default -o yaml
-            echo "::error::Expected ${RESULT_EXPECTATION}."
-            exit 1
-          fi
-        fi
+        echo "FactoryTask completed successfully."
 
     - name: Create PR from fork to upstream
       if: success() || failure()
