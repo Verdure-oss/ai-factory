@@ -86,7 +86,7 @@ jobs:
             --jq "[.[] | select(
               (.labels | map(.name) | any(. == \"ai-factory\")) and
               (.labels | map(.name) | any(. == \"ai-factory-run\") or any(. == \"ai-factory-smoke\"))
-            ) | {repo: \"${REPO}\", number: .number, base_ref: \"${REF}\"}]" 2>/dev/null || echo "[]")
+            ) | {repo: \"${REPO}\", issue_number: .number, base_ref: \"${REF}\"}]" 2>/dev/null || echo "[]")
 
           ISSUE_COUNT=$(echo "$ISSUES" | jq 'length')
           echo "  Found ${ISSUE_COUNT} matching issues in ${REPO}"
@@ -95,7 +95,7 @@ jobs:
           if [[ "$ISSUE_COUNT" -gt 0 ]]; then
             FILTERED="[]"
             while IFS= read -r issue; do
-              ISSUE_NUM=$(echo "$issue" | jq '.number')
+              ISSUE_NUM=$(echo "$issue" | jq '.issue_number')
               BRANCH_NAME="ai-factory-${ISSUE_NUM}"
 
               # Check if PR already exists from our fork
