@@ -52,6 +52,7 @@ jobs:
       count: ${{ steps.discover.outputs.count }}
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      FORK_OWNER: Verdure-oss
     steps:
     - name: Validate PAT token
       run: |
