@@ -406,9 +406,10 @@ jobs:
         echo "Webhook payload repository:"
         jq '.repository.full_name' "${RUNNER_TEMP}/github-issue.json"
 
-        # Run webhook server from fork directory so FactoryTask operates on fork code
-        cd fork
-        go run ../factory/cmd/factory task webhook serve \
+        # Run webhook server from factory directory (go.mod is there)
+        # FactoryTask clones from clone_url in payload (fork), not local directory
+        cd factory
+        go run ./factory/cmd/factory task webhook serve \
           --addr 127.0.0.1:8080 \
           --apply \
           --repository "${FORK_REPO}" \
@@ -444,7 +445,7 @@ jobs:
 
         kubectl get factorytask "${TASK_NAME}" -n default -o yaml
 
-        go run ../factory/cmd/factory task controller watch \
+        go run ./factory/cmd/factory task controller watch \
           -n default \
           --once \
           --interval=1s \
