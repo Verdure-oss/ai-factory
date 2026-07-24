@@ -162,12 +162,15 @@ jobs:
       run: |
         # Extract repo name without owner (e.g. hermes-agent from jwz722733-blip/hermes-agent)
         REPO_NAME="${TARGET_REPO#*/}"
+        # Branch name follows change-request flow convention: factory-task/{repo}-{issue}
+        TASK_REPOSITORY="$(printf '%s' "${TARGET_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
+        BRANCH_NAME="factory-task/${TASK_REPOSITORY}-${ISSUE_NUMBER}"
         echo "REPO_NAME=${REPO_NAME}" >> "$GITHUB_ENV"
         echo "FORK_REPO=${FORK_OWNER}/${REPO_NAME}" >> "$GITHUB_ENV"
-        echo "BRANCH_NAME=ai-factory-${ISSUE_NUMBER}" >> "$GITHUB_ENV"
+        echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_ENV"
         echo "Target: ${TARGET_REPO}"
         echo "Fork: ${FORK_OWNER}/${REPO_NAME}"
-        echo "Branch: ai-factory-${ISSUE_NUMBER}"
+        echo "Branch: ${BRANCH_NAME}"
 
     - name: Fetch and validate target issue
       id: fetch-issue
@@ -225,12 +228,6 @@ jobs:
         ref: ${{ env.BASE_REF }}
         path: fork
         token: ${{ secrets.PAT_TOKEN }}
-
-    - name: Create feature branch in fork
-      working-directory: fork
-      run: |
-        git checkout -b "${BRANCH_NAME}"
-        echo "Created branch: ${BRANCH_NAME}"
 
     - name: Checkout ai-factory
       uses: actions/checkout@v4
