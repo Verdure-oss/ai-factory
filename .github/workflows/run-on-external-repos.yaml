@@ -479,22 +479,25 @@ jobs:
 
     - name: Create PR from fork to upstream
       if: success() || failure()
+      id: create-pr
       run: |
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        PR_URL=""
 
         # Check if PR already exists
-        EXISTING_PR=$(gh pr list --repo "${TARGET_REPO}" \
+        EXISTING_PR_URL=$(gh pr list --repo "${TARGET_REPO}" \
           --head "${FORK_OWNER}:${BRANCH_NAME}" \
           --state open \
-          --json number --jq 'length')
+          --json url --jq '.[0].url // empty')
 
-        if [[ "$EXISTING_PR" -gt 0 ]]; then
-          echo "PR already exists for ${FORK_OWNER}:${BRANCH_NAME}, skipping."
+        if [[ -n "$EXISTING_PR_URL" ]]; then
+          echo "PR already exists: ${EXISTING_PR_URL}"
+          PR_URL="${EXISTING_PR_URL}"
         else
-          # Check if the branch exists on the fork (change-request flow should have pushed it)
+          # Check if the branch exists on the fork
           if gh api "repos/${FORK_REPO}/branches/${BRANCH_NAME}" >/dev/null 2>&1; then
             echo "Creating PR from ${FORK_OWNER}:${BRANCH_NAME} to ${TARGET_REPO}:${BASE_REF}..."
-            gh pr create \
+            PR_URL=$(gh pr create \
               --repo "${TARGET_REPO}" \
               --head "${FORK_OWNER}:${BRANCH_NAME}" \
               --base "${BASE_REF}" \
@@ -511,24 +514,31 @@ jobs:
         ---
         *This PR was generated automatically by [ai-factory](https://github.com/Verdure-oss/ai-factory).*
         EOF
-        )"
-            echo "PR created successfully."
+        )")
+            echo "PR created: ${PR_URL}"
           else
             echo "::warning::Branch ${BRANCH_NAME} not found on ${FORK_REPO}. Change-request flow may not have pushed changes."
           fi
         fi
 
+        echo "pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
+
     - name: Comment on target issue
       if: success()
       run: |
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        PR_URL="${{ steps.create-pr.outputs.pr_url }}"
 
         COMMENT_BODY="## ai-factory result: Succeeded\n\n"
         COMMENT_BODY+="- **Target:** \`${TARGET_REPO}\` #${ISSUE_NUMBER}\n"
         COMMENT_BODY+="- **Actions run:** ${RUN_URL}\n"
         COMMENT_BODY+="- **Fork:** ${FORK_REPO}\n"
         COMMENT_BODY+="- **Branch:** ${BRANCH_NAME}\n"
-        COMMENT_BODY+="\nA pull request has been created from the fork.\n"
+        if [[ -n "${PR_URL}" ]]; then
+          COMMENT_BODY+="\n**Pull request:** ${PR_URL}\n"
+        else
+          COMMENT_BODY+="\nA pull request has been created from the fork.\n"
+        fi
 
         # Try to comment (may fail if repo doesn't allow external comments)
         gh api "repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}/comments" \
