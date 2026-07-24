@@ -98,7 +98,8 @@ jobs:
             FORK_OWNER="Verdure-oss"
             while IFS= read -r issue; do
               ISSUE_NUM=$(echo "$issue" | jq '.issue_number')
-              BRANCH_NAME="ai-factory-${ISSUE_NUM}"
+              REPO_SLUG="$(printf '%s' "${REPO}" | tr '[:upper:]/_' '[:lower:]--')"
+              BRANCH_NAME="factory-task/${REPO_SLUG}-${ISSUE_NUM}"
 
               # Check if PR already exists from our fork
               EXISTING=$(gh api "repos/${REPO}/pulls" \
@@ -475,7 +476,7 @@ jobs:
         fi
 
     - name: Create PR from fork to upstream
-      if: success()
+      if: success() || failure()
       run: |
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
