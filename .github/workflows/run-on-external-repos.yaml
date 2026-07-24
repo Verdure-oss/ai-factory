@@ -94,6 +94,8 @@ jobs:
           # Dedup: check existing PRs from our fork
           if [[ "$ISSUE_COUNT" -gt 0 ]]; then
             FILTERED="[]"
+            REPO_NAME="${REPO#*/}"  # extract repo name without owner
+            FORK_OWNER="Verdure-oss"
             while IFS= read -r issue; do
               ISSUE_NUM=$(echo "$issue" | jq '.issue_number')
               BRANCH_NAME="ai-factory-${ISSUE_NUM}"
@@ -103,7 +105,7 @@ jobs:
                 --method GET \
                 -f state=all \
                 -f per_page=100 \
-                --jq "[.[] | select(.head.ref == \"${BRANCH_NAME}\" and .head.repo.owner.login == \"Verdure-oss\")] | length" 2>/dev/null || echo "0")
+                --jq "[.[] | select(.head.ref == \"${BRANCH_NAME}\" and .head.repo.owner.login == \"${FORK_OWNER}\")] | length" 2>/dev/null || echo "0")
 
               if [[ "$EXISTING" -gt 0 ]]; then
                 echo "  Skipping #${ISSUE_NUM}: PR already exists"
@@ -148,14 +150,25 @@ jobs:
       BASE_REF: ${{ matrix.base_ref }}
       AGENT_COMMAND: ${{ inputs.agent_command }}
       VALIDATION_COMMAND: ${{ inputs.validation_command }}
-      FORK_REPO: "Verdure-oss/${{ matrix.repo }}"
-      BRANCH_NAME: ai-factory-${{ matrix.issue_number }}
+      REPO_NAME: ${{ matrix.repo }}  # will be overridden in steps
+      FORK_OWNER: Verdure-oss
       KIND_CLUSTER_NAME: ai-factory-issue
       AGENT_SANDBOX_SRC: /tmp/agent-sandbox
       CODING_AGENT_IMAGE: ai-factory/coding-agent-sandbox:ci
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
 
     steps:
+    - name: Resolve fork repository name
+      run: |
+        # Extract repo name without owner (e.g. hermes-agent from jwz722733-blip/hermes-agent)
+        REPO_NAME="${TARGET_REPO#*/}"
+        echo "REPO_NAME=${REPO_NAME}" >> "$GITHUB_ENV"
+        echo "FORK_REPO=${FORK_OWNER}/${REPO_NAME}" >> "$GITHUB_ENV"
+        echo "BRANCH_NAME=ai-factory-${ISSUE_NUMBER}" >> "$GITHUB_ENV"
+        echo "Target: ${TARGET_REPO}"
+        echo "Fork: ${FORK_OWNER}/${REPO_NAME}"
+        echo "Branch: ai-factory-${ISSUE_NUMBER}"
+
     - name: Fetch and validate target issue
       id: fetch-issue
       run: |
@@ -214,7 +227,7 @@ jobs:
         path: fork
         token: ${{ secrets.PAT_TOKEN }}
 
-    - name: Create feature branch
+    - name: Create feature branch in fork
       working-directory: fork
       run: |
         git checkout -b "${BRANCH_NAME}"
@@ -320,6 +333,7 @@ jobs:
 
     - name: Run FactoryTask
       env:
+        FACTORY_REPOSITORY: ${{ env.FORK_REPO }}
         GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         AI_FACTORY_GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         OPENAI_API_KEY: ${{ secrets.AI_FACTORY_OPENAI_API_KEY }}
@@ -335,7 +349,7 @@ jobs:
         OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_FINAL_REQUEST_TIMEOUT_SECONDS || '90' }}
         OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_REPAIR_REQUEST_TIMEOUT_SECONDS || '90' }}
       run: |
-        TASK_REPOSITORY="$(printf '%s' "${TARGET_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
+        TASK_REPOSITORY="$(printf '%s' "${FORK_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
         TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
 
         CHANGE_REQUEST=false
@@ -372,8 +386,10 @@ jobs:
           RESULT_EXPECTATION="an ai-factory-run change request URL or an existing PR status"
         fi
 
-        echo '${{ steps.fetch-issue.outputs.issue_json }}' > "${RUNNER_TEMP}/issue.json"
-        gh api "repos/${TARGET_REPO}" > "${RUNNER_TEMP}/repository.json"
+        # Build webhook payload pointing to FORK (not original repo)
+        # This ensures FactoryTask clones the fork, and change-request pushes to the fork
+        gh api "repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}" > "${RUNNER_TEMP}/issue.json"
+        gh api "repos/${FORK_REPO}" > "${RUNNER_TEMP}/repository.json"
         jq -n \
           --slurpfile issue "${RUNNER_TEMP}/issue.json" \
           --slurpfile repository "${RUNNER_TEMP}/repository.json" \
@@ -388,11 +404,15 @@ jobs:
             }
           }' > "${RUNNER_TEMP}/github-issue.json"
 
-        cd factory
-        go run ./factory/cmd/factory task webhook serve \
+        echo "Webhook payload repository:"
+        jq '.repository.full_name' "${RUNNER_TEMP}/github-issue.json"
+
+        # Run webhook server from fork directory so FactoryTask operates on fork code
+        cd fork
+        go run ../factory/cmd/factory task webhook serve \
           --addr 127.0.0.1:8080 \
           --apply \
-          --repository "${TARGET_REPO}" \
+          --repository "${FORK_REPO}" \
           --trigger-action opened \
           --trigger-action reopened \
           --trigger-action labeled \
@@ -425,7 +445,7 @@ jobs:
 
         kubectl get factorytask "${TASK_NAME}" -n default -o yaml
 
-        go run ./factory/cmd/factory task controller watch \
+        go run ../factory/cmd/factory task controller watch \
           -n default \
           --once \
           --interval=1s \
@@ -456,60 +476,11 @@ jobs:
           fi
         fi
 
-    - name: Push and create PR
-      if: success()
-      working-directory: fork
-      run: |
-        RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-        # Push branch to fork
-        git add -A
-        git status
-        if git diff --cached --quiet; then
-          echo "No changes to commit."
-        else
-          git commit -m "ai-factory: fix issue #${ISSUE_NUMBER}"
-          git push origin "${BRANCH_NAME}" --force
-        fi
-
-        # Create PR from fork to upstream
-        PR_TITLE="ai-factory: fix issue #${ISSUE_NUMBER}"
-        PR_BODY=$(cat <<EOF
-        ## ai-factory automated fix
-
-        Resolves #${ISSUE_NUMBER}
-
-        - **Actions run:** ${RUN_URL}
-        - **Trigger:** \`${{ steps.fetch-issue.outputs.trigger_label }}\`
-        - **Agent:** \`${AGENT_COMMAND}\`
-
-        ---
-        *This PR was generated automatically by [ai-factory](https://github.com/Verdure-oss/ai-factory).*
-        EOF
-        )
-
-        # Check if PR already exists
-        EXISTING_PR=$(gh pr list --repo "${TARGET_REPO}" \
-          --head "Verdure-oss:${BRANCH_NAME}" \
-          --json number --jq 'length')
-
-        if [[ "$EXISTING_PR" -gt 0 ]]; then
-          echo "PR already exists for branch ${BRANCH_NAME}, skipping creation."
-        else
-          gh pr create \
-            --repo "${TARGET_REPO}" \
-            --head "Verdure-oss:${BRANCH_NAME}" \
-            --base "${BASE_REF}" \
-            --title "${PR_TITLE}" \
-            --body "${PR_BODY}"
-          echo "PR created successfully."
-        fi
-
     - name: Comment on target issue
       if: success()
       run: |
         RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-        PR_URL="https://github.com/${TARGET_REPO}/pulls?q=is%3Apr+author%3Aapp%2FVerdure-oss+ai-factory"
+        PR_URL="https://github.com/${FORK_REPO}/pulls?q=is%3Apr+ai-factory-${ISSUE_NUMBER}"
 
         COMMENT_BODY="## ai-factory result: Succeeded\n\n"
         COMMENT_BODY+="- **Target:** \`${TARGET_REPO}\` #${ISSUE_NUMBER}\n"
@@ -531,7 +502,7 @@ jobs:
         PHASE=""
         REASON=""
         MESSAGE=""
-        TASK_REPOSITORY="$(printf '%s' "${TARGET_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
+        TASK_REPOSITORY="$(printf '%s' "${FORK_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
         TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
         if kubectl get factorytask "${TASK_NAME}" -n default >/dev/null 2>&1; then
           PHASE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
@@ -559,5 +530,5 @@ jobs:
       if: always()
       run: |
         kubectl get factorytasks,sandboxclaims,sandboxwarmpools,pods -A || true
-        TASK_REPOSITORY="$(printf '%s' "${TARGET_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
+        TASK_REPOSITORY="$(printf '%s' "${FORK_REPO}" | tr '[:upper:]/_' '[:lower:]--')"
         kubectl get factorytask "github-${TASK_REPOSITORY}-${ISSUE_NUMBER}" -n default -o yaml || true
