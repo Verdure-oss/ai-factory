@@ -123,6 +123,8 @@ spec:
                 properties:
                   enabled:
                     type: boolean
+                  pushOnly:
+                    type: boolean
                   branchName:
                     type: string
                   branchPrefix:
