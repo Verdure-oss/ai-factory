@@ -209,7 +209,7 @@ jobs:
           if [[ "${TRIGGER_TYPE}" == "smoke" ]]; then
             # 冒烟测试模式
             AGENT_COMMAND="cat >/tmp/ai-factory-agent-prompt.txt"
-            VALIDATION_COMMAND="test -s /tmp/ai-factory-agent-prompt.txt && test -f factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
+            VALIDATION_COMMAND="test -s /tmp/ai-factory-agent-prompt.txt && test -f ai-factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
             CHANGE_REQUEST="false"
             echo "模式: 冒烟测试"
           else
