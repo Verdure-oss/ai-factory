@@ -14,30 +14,20 @@
 
 name: Webhook Receiver
 
-# 触发条件：GitHub App 发送的 workflow_dispatch 事件
+# 触发条件：GitHub App 发送的 issues 事件
 on:
-  workflow_dispatch:
-    inputs:
-      repository:
-        description: '目标仓库 (格式: owner/repo)'
-        required: true
-        type: string
-      issue_number:
-        description: 'Issue 编号'
-        required: true
-        type: number
-      action:
-        description: '触发动作 (labeled/opened/closed)'
-        required: true
-        type: string
-      label_name:
-        description: '标签名称 (如果是 labeled 事件)'
-        required: false
-        type: string
-      sender:
-        description: '触发者用户名'
-        required: true
-        type: string
+  issues:
+    types:
+      - labeled
+      - opened
+      - closed
+      - reopened
+
+# 权限配置
+permissions:
+  contents: read
+  actions: write
+  issues: read
 
 # 权限配置
 permissions:
@@ -47,7 +37,7 @@ permissions:
 
 # 并发控制
 concurrency:
-  group: webhook-receiver-${{ inputs.repository }}-${{ inputs.issue_number }}
+  group: webhook-receiver-${{ github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
@@ -57,58 +47,38 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Validate inputs
-        id: validate
+      - name: Parse event payload
+        id: parse
         run: |
-          echo "验证输入参数..."
+          echo "解析事件负载..."
 
-          # 验证仓库格式
-          if [[ ! "${{ inputs.repository }}" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$ ]]; then
-            echo "错误: 仓库格式不正确，应为 owner/repo"
-            exit 1
-          fi
+          # 从 GitHub 事件中提取信息
+          REPOSITORY="${{ github.repository }}"
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ACTION="${{ github.event.action }}"
+          LABEL_NAME="${{ github.event.label.name }}"
+          SENDER="${{ github.event.sender.login }}"
 
-          # 验证 Issue 编号
-          if [[ "${{ inputs.issue_number }}" -le 0 ]]; then
-            echo "错误: Issue 编号必须大于 0"
-            exit 1
-          fi
+          echo "仓库: ${REPOSITORY}"
+          echo "Issue: #${ISSUE_NUMBER}"
+          echo "动作: ${ACTION}"
+          echo "标签: ${LABEL_NAME}"
+          echo "触发者: ${SENDER}"
 
-          # 验证动作
-          if [[ ! "${{ inputs.action }}" =~ ^(labeled|opened|closed|reopened)$ ]]; then
-            echo "错误: 不支持的动作: ${{ inputs.action }}"
-            exit 1
-          fi
-
-          # 验证标签（如果是 labeled 事件）
-          if [[ "${{ inputs.action }}" == "labeled" ]]; then
-            if [[ -z "${{ inputs.label_name }}" ]]; then
-              echo "错误: labeled 事件必须提供标签名称"
-              exit 1
-            fi
-
-            # 检查是否是 ai-factory 相关标签
-            if [[ ! "${{ inputs.label_name }}" =~ ^ai-factory ]]; then
-              echo "跳过: 非 ai-factory 标签: ${{ inputs.label_name }}"
-              echo "skip=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-
-          echo "✓ 输入参数验证通过"
-          echo "skip=false" >> $GITHUB_OUTPUT
+          # 设置输出
+          echo "repository=${REPOSITORY}" >> $GITHUB_OUTPUT
+          echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
+          echo "action=${ACTION}" >> $GITHUB_OUTPUT
+          echo "label_name=${LABEL_NAME}" >> $GITHUB_OUTPUT
+          echo "sender=${SENDER}" >> $GITHUB_OUTPUT
 
       - name: Check label eligibility
         id: check-label
-        if: steps.validate.outputs.skip != 'true'
         run: |
           echo "检查标签资格..."
 
-          REPOSITORY="${{ inputs.repository }}"
-          ISSUE_NUMBER="${{ inputs.issue_number }}"
-          ACTION="${{ inputs.action }}"
-          LABEL_NAME="${{ inputs.label_name }}"
-          SENDER="${{ inputs.sender }}"
+          ACTION="${{ steps.parse.outputs.action }}"
+          LABEL_NAME="${{ steps.parse.outputs.label_name }}"
 
           # 如果是 labeled 事件，检查是否是触发标签
           if [[ "${ACTION}" == "labeled" ]]; then
@@ -149,11 +119,11 @@ jobs:
         run: |
           echo "发送 repository_dispatch 事件..."
 
-          REPOSITORY="${{ inputs.repository }}"
-          ISSUE_NUMBER="${{ inputs.issue_number }}"
-          ACTION="${{ inputs.action }}"
-          LABEL_NAME="${{ inputs.label_name }}"
-          SENDER="${{ inputs.sender }}"
+          REPOSITORY="${{ steps.parse.outputs.repository }}"
+          ISSUE_NUMBER="${{ steps.parse.outputs.issue_number }}"
+          ACTION="${{ steps.parse.outputs.action }}"
+          LABEL_NAME="${{ steps.parse.outputs.label_name }}"
+          SENDER="${{ steps.parse.outputs.sender }}"
           TRIGGER_TYPE="${{ steps.check-label.outputs.trigger_type }}"
 
           # 构造 payload
@@ -204,11 +174,11 @@ jobs:
           echo "=========================================="
           echo "Webhook 处理结果"
           echo "=========================================="
-          echo "仓库: ${{ inputs.repository }}"
-          echo "Issue: #${{ inputs.issue_number }}"
-          echo "动作: ${{ inputs.action }}"
-          echo "标签: ${{ inputs.label_name }}"
-          echo "触发者: ${{ inputs.sender }}"
+          echo "仓库: ${{ steps.parse.outputs.repository }}"
+          echo "Issue: #${{ steps.parse.outputs.issue_number }}"
+          echo "动作: ${{ steps.parse.outputs.action }}"
+          echo "标签: ${{ steps.parse.outputs.label_name }}"
+          echo "触发者: ${{ steps.parse.outputs.sender }}"
           echo "触发类型: ${{ steps.check-label.outputs.trigger_type }}"
           echo "Dispatch 发送: ${{ steps.dispatch.outputs.dispatch_sent }}"
           echo "=========================================="
@@ -219,9 +189,9 @@ jobs:
           echo "=========================================="
           echo "跳过处理"
           echo "=========================================="
-          echo "仓库: ${{ inputs.repository }}"
-          echo "Issue: #${{ inputs.issue_number }}"
-          echo "动作: ${{ inputs.action }}"
-          echo "标签: ${{ inputs.label_name }}"
+          echo "仓库: ${{ steps.parse.outputs.repository }}"
+          echo "Issue: #${{ steps.parse.outputs.issue_number }}"
+          echo "动作: ${{ steps.parse.outputs.action }}"
+          echo "标签: ${{ steps.parse.outputs.label_name }}"
           echo "原因: 非触发标签或条件不满足"
           echo "=========================================="
