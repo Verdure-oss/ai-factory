@@ -1,0 +1,103 @@
+# ai-factory Bridge Workflow
+# 此文件需要部署到目标仓库的 .github/workflows/ 目录下
+# 用途：监听 Issue 标签事件，调用 ai-factory 中央仓库的 webhook-receiver workflow
+#
+# 配置要求：
+#   1. 将此文件放到目标仓库的 .github/workflows/ 目录
+#   2. 在目标仓库（或 org 级别）设置以下 Secrets：
+#      - AI_FACTORY_DISPATCH_TOKEN: 具有 repo + workflow 权限的 PAT
+#      - AI_FACTORY_REPO: ai-factory 仓库地址（格式: owner/repo，如 Verdure-oss/ai-factory）
+
+name: AI Factory Bridge
+
+on:
+  issues:
+    types:
+      - labeled
+
+permissions:
+  issues: read
+
+concurrency:
+  group: ai-factory-bridge-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      AI_FACTORY_REPO: ${{ secrets.AI_FACTORY_REPO || 'Verdure-oss/ai-factory' }}
+
+    steps:
+      - name: Check label eligibility
+        id: check-label
+        run: |
+          LABEL_NAME="${{ github.event.label.name }}"
+
+          case "${LABEL_NAME}" in
+            ai-factory-run)
+              echo "✓ 触发正式运行"
+              echo "should_trigger=true" >> $GITHUB_OUTPUT
+              ;;
+            ai-factory-smoke)
+              echo "✓ 触发冒烟测试"
+              echo "should_trigger=true" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "跳过: 非触发标签: ${LABEL_NAME}"
+              echo "should_trigger=false" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Dispatch to ai-factory
+        if: steps.check-label.outputs.should_trigger == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AI_FACTORY_DISPATCH_TOKEN }}
+        run: |
+          echo "调用 ai-factory webhook-receiver..."
+
+          REPOSITORY="${{ github.repository }}"
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ACTION="${{ github.event.action }}"
+          LABEL_NAME="${{ github.event.label.name }}"
+          SENDER="${{ github.event.sender.login }}"
+
+          echo "仓库: ${REPOSITORY}"
+          echo "Issue: #${ISSUE_NUMBER}"
+          echo "标签: ${LABEL_NAME}"
+          echo "目标: ${AI_FACTORY_REPO}"
+
+          # 调用 ai-factory 的 webhook-receiver workflow
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"repository\": \"${REPOSITORY}\",
+                \"issue_number\": \"${ISSUE_NUMBER}\",
+                \"action\": \"${ACTION}\",
+                \"label_name\": \"${LABEL_NAME}\",
+                \"sender\": \"${SENDER}\"
+              }
+            }" \
+            "https://api.github.com/repos/${AI_FACTORY_REPO}/actions/workflows/webhook-receiver.yaml/dispatches")
+
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -n1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+
+          if [[ "${HTTP_CODE}" -ge 200 && "${HTTP_CODE}" -lt 300 ]]; then
+            echo "✓ workflow_dispatch 调用成功"
+          else
+            echo "错误: workflow_dispatch 调用失败"
+            echo "HTTP 状态码: ${HTTP_CODE}"
+            echo "响应: ${BODY}"
+            exit 1
+          fi
+
+      - name: Skip notification
+        if: steps.check-label.outputs.should_trigger != 'true'
+        run: |
+          echo "跳过: 标签 '${{ github.event.label.name }}' 不是 ai-factory 触发标签"

@@ -14,14 +14,31 @@
 
 name: Webhook Receiver
 
-# 触发条件：GitHub App 发送的 issues 事件
+# 触发条件：workflow_dispatch（由目标仓库的 bridge workflow 调用）
 on:
-  issues:
-    types:
-      - labeled
-      - opened
-      - closed
-      - reopened
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Target repository (owner/repo)'
+        required: true
+        type: string
+      issue_number:
+        description: 'Issue number'
+        required: true
+        type: string
+      action:
+        description: 'Event action (labeled/opened/closed/reopened)'
+        required: true
+        type: string
+      label_name:
+        description: 'Label name (for labeled action)'
+        required: false
+        default: ''
+        type: string
+      sender:
+        description: 'Sender login'
+        required: true
+        type: string
 
 # 权限配置
 permissions:
@@ -31,7 +48,7 @@ permissions:
 
 # 并发控制
 concurrency:
-  group: webhook-receiver-${{ github.event.issue.number }}
+  group: webhook-receiver-${{ inputs.issue_number }}
   cancel-in-progress: true
 
 jobs:
@@ -46,12 +63,11 @@ jobs:
         run: |
           echo "解析事件负载..."
 
-          # 从 GitHub 事件中提取信息
-          REPOSITORY="${{ github.repository }}"
-          ISSUE_NUMBER="${{ github.event.issue.number }}"
-          ACTION="${{ github.event.action }}"
-          LABEL_NAME="${{ github.event.label.name }}"
-          SENDER="${{ github.event.sender.login }}"
+          REPOSITORY="${{ inputs.repository }}"
+          ISSUE_NUMBER="${{ inputs.issue_number }}"
+          ACTION="${{ inputs.action }}"
+          LABEL_NAME="${{ inputs.label_name }}"
+          SENDER="${{ inputs.sender }}"
 
           echo "仓库: ${REPOSITORY}"
           echo "Issue: #${ISSUE_NUMBER}"

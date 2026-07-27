@@ -179,7 +179,8 @@ AI_FACTORY_APP_NAME={APP_NAME}
 # 私钥路径
 AI_FACTORY_APP_PRIVATE_KEY_PATH={config_dir}/{APP_NAME}.private-key.pem
 
-# Webhook 配置
+# Webhook 配置（纯 GitHub Actions Bridge 架构下不再使用）
+# 仅在部署外部 webhook-handler.py 时需要
 AI_FACTORY_APP_WEBHOOK_URL=https://github.com/apps/{APP_NAME}/webhooks
 AI_FACTORY_APP_WEBHOOK_CONTENT_TYPE=json
 AI_FACTORY_APP_WEBHOOK_INSECURE_SSL=0
@@ -213,45 +214,74 @@ AI_FACTORY_APP_ID={app_id}
 AI_FACTORY_APP_CLIENT_SECRET={client_secret}
 AI_FACTORY_APP_WEBHOOK_SECRET={webhook_secret}
 
-# GitHub Token (用于访问目标仓库)
+# GitHub Token (用于 ai-factory 访问目标仓库，创建 PR 等)
 # 需要手动设置，具有 repo 权限
 # AI_FACTORY_GITHUB_TOKEN=your_github_token
 
 # OpenAI API Key (用于正式运行)
 # 需要手动设置
 # AI_FACTORY_OPENAI_API_KEY=your_openai_api_key
+
+# --- 目标仓库需要设置的 Secrets ---
+# 以下 Secret 需要在每个目标仓库中设置（不是 ai-factory 仓库）
+
+# AI_FACTORY_DISPATCH_TOKEN: 用于 Bridge Workflow 调用 ai-factory 的 workflow_dispatch API
+# 需要 PAT (Personal Access Token)，权限: repo + workflow
+# AI_FACTORY_DISPATCH_TOKEN=your_pat_token
+
+# AI_FACTORY_REPO (可选): ai-factory 中央仓库地址，默认 Verdure-oss/ai-factory
+# AI_FACTORY_REPO=Verdure-oss/ai-factory
 """
     secrets_path.write_text(secrets_content)
     print(f"[OK] GitHub Secrets 配置已保存到: {secrets_path}")
     print("")
-    print("请将以下 Secrets 添加到 ai-factory 仓库：")
+    print("=== ai-factory 中央仓库 Secrets ===")
     print("  1. AI_FACTORY_APP_ID")
     print("  2. AI_FACTORY_APP_CLIENT_SECRET")
     print("  3. AI_FACTORY_APP_WEBHOOK_SECRET")
     print("  4. AI_FACTORY_GITHUB_TOKEN")
     print("  5. AI_FACTORY_OPENAI_API_KEY")
+    print("")
+    print("=== 每个目标仓库 Secrets ===")
+    print("  1. AI_FACTORY_DISPATCH_TOKEN (PAT with repo+workflow)")
+    print("  2. AI_FACTORY_REPO (可选, 默认: Verdure-oss/ai-factory)")
 
-def configure_webhook():
-    """配置 Webhook"""
+def configure_bridge():
+    """配置 Bridge Workflow（替代 Webhook）"""
     print("")
-    print("步骤 4: 配置 Webhook")
-    print("--------------------")
-
-    webhook_url = f"https://api.github.com/repos/your-org/ai-factory/actions/workflows/webhook-receiver.yaml/dispatches"
-
-    print("Webhook 配置说明：")
+    print("步骤 4: 部署 Bridge Workflow 到目标仓库")
+    print("------------------------------------------")
     print("")
-    print("1. 访问 GitHub App 设置页面：")
-    print(f"   https://github.com/apps/{APP_NAME}")
+    print("【重要】纯 GitHub Actions 架构不再需要配置 Webhook URL。")
+    print("改为在目标仓库中部署 Bridge Workflow 来转发事件。")
     print("")
-    print("2. 配置 Webhook URL：")
-    print(f"   {webhook_url}")
+    print("1. 创建 Personal Access Token (PAT)：")
+    print("   访问: https://github.com/settings/tokens")
+    print("   权限要求: repo + workflow")
+    print("   记为: AI_FACTORY_DISPATCH_TOKEN")
     print("")
-    print("3. 配置事件：")
-    print("   - issues")
-    print("   - issue_comment")
+    print("2. 在目标仓库中设置 Secrets：")
+    print("   进入目标仓库 → Settings → Secrets → Actions → New secret")
     print("")
-    print("4. 配置权限：")
+    print("   Secret 1:")
+    print("     Name:  AI_FACTORY_DISPATCH_TOKEN")
+    print("     Value: 上面创建的 PAT")
+    print("")
+    print("   Secret 2 (可选，默认为 Verdure-oss/ai-factory):")
+    print("     Name:  AI_FACTORY_REPO")
+    print("     Value: ai-factory 中央仓库地址 (格式: owner/repo)")
+    print("")
+    print("3. 部署 Bridge Workflow 文件到目标仓库：")
+    print("   将以下文件复制到目标仓库的 .github/workflows/ 目录下:")
+    print("")
+    print("   源文件: .github/workflows/templates/ai-factory-bridge.yaml")
+    print("   目标路径: <目标仓库>/.github/workflows/ai-factory-bridge.yaml")
+    print("")
+    print("   Bridge Workflow 会监听 issues: labeled 事件，")
+    print("   并通过 workflow_dispatch API 调用 ai-factory 中央仓库的")
+    print("   webhook-receiver.yaml 来处理事件。")
+    print("")
+    print("4. GitHub App 权限配置（安装时自动设置）：")
     print("   - Issues: Read & Write")
     print("   - Pull Requests: Read & Write")
     print("   - Contents: Read & Write")
@@ -259,12 +289,12 @@ def configure_webhook():
     print("   - Metadata: Read")
 
 def install_github_app():
-    """安装 GitHub App"""
+    """安装 GitHub App 并部署 Bridge Workflow"""
     print("")
-    print("步骤 5: 安装 GitHub App")
-    print("----------------------")
+    print("步骤 5: 安装 GitHub App 并部署 Bridge Workflow")
+    print("------------------------------------------------")
 
-    print("安装说明：")
+    print("5a. 安装 GitHub App：")
     print("")
     print("1. 访问 GitHub App 安装页面：")
     print(f"   https://github.com/apps/{APP_NAME}/installations/new")
@@ -277,43 +307,65 @@ def install_github_app():
     print("   - 确认权限设置")
     print("   - 点击 Install")
     print("")
-    print("4. 验证安装：")
+    print("5b. 部署 Bridge Workflow 到目标仓库：")
+    print("")
+    print("1. 复制 Bridge Workflow 文件：")
+    print("   源: ai-factory/.github/workflows/templates/ai-factory-bridge.yaml")
+    print("   目标: <目标仓库>/.github/workflows/ai-factory-bridge.yaml")
+    print("")
+    print("2. 在目标仓库设置 Secrets：")
+    print("   - AI_FACTORY_DISPATCH_TOKEN: 具有 repo+workflow 权限的 PAT")
+    print("   - AI_FACTORY_REPO (可选): 默认为 Verdure-oss/ai-factory")
+    print("")
+    print("3. 验证部署：")
     print("   - 在目标仓库创建 Issue")
     print("   - 添加 'ai-factory-run' 标签")
-    print("   - 检查 ai-factory 仓库是否收到事件")
+    print("   - 检查目标仓库的 Actions 中 Bridge Workflow 是否运行")
+    print("   - 检查 ai-factory 中央仓库是否收到事件并触发处理")
 
 def show_usage():
     """显示使用说明"""
     print("")
     print("==========================================")
-    print("使用说明")
+    print("使用说明（纯 GitHub Actions 架构）")
     print("==========================================")
+    print("")
+    print("架构流程：")
+    print("  目标仓库 Issue labeled")
+    print("    → Bridge Workflow (on: issues: labeled)")
+    print("    → workflow_dispatch API 调用")
+    print("    → ai-factory webhook-receiver.yaml")
+    print("    → repository_dispatch")
+    print("    → ai-factory process-issue.yaml")
     print("")
     print("1. 创建 GitHub App：")
     print("   python create-github-app.py")
     print("")
-    print("2. 设置 GitHub Secrets：")
-    print("   在 ai-factory 仓库中设置以下 Secrets：")
+    print("2. 设置 ai-factory 中央仓库 Secrets：")
     print("   - AI_FACTORY_APP_ID")
     print("   - AI_FACTORY_APP_CLIENT_SECRET")
     print("   - AI_FACTORY_APP_WEBHOOK_SECRET")
-    print("   - AI_FACTORY_GITHUB_TOKEN")
+    print("   - AI_FACTORY_GITHUB_TOKEN (用于访问目标仓库)")
     print("   - AI_FACTORY_OPENAI_API_KEY")
     print("")
-    print("3. 安装 GitHub App：")
-    print("   在目标仓库中安装 GitHub App")
+    print("3. 安装 GitHub App 到目标仓库")
     print("")
-    print("4. 测试流程：")
+    print("4. 在目标仓库部署 Bridge Workflow：")
+    print("   - 复制 ai-factory-bridge.yaml 到目标仓库 .github/workflows/")
+    print("   - 设置 AI_FACTORY_DISPATCH_TOKEN secret (PAT with repo+workflow)")
+    print("")
+    print("5. 测试流程：")
     print("   - 在目标仓库创建 Issue")
     print("   - 添加 'ai-factory-run' 标签")
-    print("   - 检查 ai-factory 仓库的 workflow 是否触发")
+    print("   - 检查目标仓库 Bridge Workflow 是否运行")
+    print("   - 检查 ai-factory 仓库 process-issue 是否触发")
     print("")
     print("==========================================")
 
 def main():
     """主函数"""
     print("AI Factory Bot GitHub App 创建工具")
-    print("版本: 1.0.0")
+    print("版本: 2.0.0 (Bridge Architecture)")
     print("")
 
     # 检查依赖
@@ -328,8 +380,8 @@ def main():
     # 保存配置
     save_app_config(app_id, client_id, client_secret, pem_file, webhook_secret)
 
-    # 配置 Webhook
-    configure_webhook()
+    # 配置 Bridge Workflow
+    configure_bridge()
 
     # 安装 GitHub App
     install_github_app()
@@ -341,9 +393,10 @@ def main():
     print("[OK] GitHub App 创建完成！")
     print("")
     print("下一步：")
-    print("1. 按照上述说明配置 GitHub Secrets")
+    print("1. 配置 ai-factory 中央仓库的 GitHub Secrets")
     print("2. 安装 GitHub App 到目标仓库")
-    print("3. 测试流程")
+    print("3. 在目标仓库部署 Bridge Workflow 并设置 AI_FACTORY_DISPATCH_TOKEN")
+    print("4. 测试完整流程")
 
 if __name__ == "__main__":
     main()
