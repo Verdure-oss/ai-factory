@@ -56,7 +56,7 @@ jobs:
       TRIGGER_TYPE: ${{ github.event.client_payload.trigger_type }}
       AI_FACTORY_RUN_AGENT_COMMAND: ${{ vars.AI_FACTORY_RUN_AGENT_COMMAND || 'ai-factory-agent openai-compatible' }}
       AI_FACTORY_RUN_VALIDATION_COMMAND: ${{ vars.AI_FACTORY_RUN_VALIDATION_COMMAND || 'go test ./...' }}
-      FACTORY_SMOKE_COMMAND: test -s /tmp/ai-factory-agent-prompt.txt && test -f factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent
+      FACTORY_SMOKE_COMMAND: test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent
 
     steps:
       - name: Parse event payload
