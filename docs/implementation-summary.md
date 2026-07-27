@@ -12,10 +12,11 @@
 - 创建需求文档和部署指南
 
 **关键决策**:
-- 使用 GitHub App 连接目标仓库
-- 使用 GitHub Actions 作为 Webhook 接收器
+- ~~使用 GitHub App 连接目标仓库~~（已优化）
+- ~~使用 GitHub Actions 作为 Webhook 接收器~~（已优化）
 - 使用 `repository_dispatch` 触发主 workflow
 - 沿用现有标签系统（`ai-factory` + `ai-factory-run` / `ai-factory-smoke`）
+- **新方案**：使用轻量级 workflow 实现跨仓库触发（详见 [跨仓库触发方案指南](cross-repo-trigger-guide.md)）
 
 ### 2. 核心文件创建 ✅
 
@@ -201,27 +202,34 @@ export GITHUB_TOKEN=your_github_token
 
 ## 部署计划
 
-### 阶段 1: 测试环境部署
+### 阶段 1: 测试环境部署 ✅
 
 **目标**: 验证基本功能
 
 **步骤**:
-1. 创建 GitHub App
-2. 配置测试仓库
+1. ~~创建 GitHub App~~（已优化为轻量级 workflow）
+2. 配置测试仓库（Verdure-oss/Test）
 3. 运行测试用例
 4. 验证功能正确性
 
 **时间**: 1-2 天
+
+**测试结果**（2026-07-27）：
+- ✅ 跨仓库触发成功
+- ✅ 事件数据正确传递
+- ✅ 标签系统正常工作
+- ✅ 冒烟模式识别正确
 
 ### 阶段 2: 生产环境部署
 
 **目标**: 正式启用中央 ai-factory
 
 **步骤**:
-1. 配置生产环境 Secrets
-2. 安装 GitHub App 到目标仓库
-3. 监控运行状态
-4. 处理问题和优化
+1. 配置生产环境 Secrets 和 Variables
+2. 在目标仓库创建轻量级 workflow
+3. 配置跨仓库触发 token
+4. 监控运行状态
+5. 处理问题和优化
 
 **时间**: 3-5 天
 
@@ -230,7 +238,7 @@ export GITHUB_TOKEN=your_github_token
 **目标**: 支持更多仓库和功能
 
 **步骤**:
-1. 支持更多目标仓库
+1. 支持更多目标仓库（每个仓库配置一次）
 2. 优化性能和稳定性
 3. 添加监控和告警
 4. 完善文档和培训
@@ -280,6 +288,7 @@ export GITHUB_TOKEN=your_github_token
 - ✅ 成功修改目标仓库并创建 PR
 - ✅ 支持 `ai-factory-run` 和 `ai-factory-smoke` 两种模式
 - ✅ 自动更新 Issue 状态和评论
+- ✅ 跨仓库触发机制正常工作
 
 ### 2. 性能标准
 
@@ -289,10 +298,17 @@ export GITHUB_TOKEN=your_github_token
 
 ### 3. 用户体验标准
 
-- 目标仓库只需一次性配置
+- 目标仓库只需一次性配置（1个 workflow 文件 + 1个 secret）
 - 执行过程有清晰的状态更新
 - 失败时有详细的错误信息
 - 文档完善，易于理解和使用
+
+### 4. 架构标准
+
+- ✅ 无需外部服务依赖
+- ✅ 使用 GitHub Actions 原生功能
+- ✅ 安全性好（使用 GitHub token 认证）
+- ✅ 维护成本低
 
 ## 后续计划
 
@@ -351,15 +367,21 @@ export GITHUB_TOKEN=your_github_token
 
 中央 ai-factory 的核心功能已经实现，包括：
 
-1. ✅ **GitHub App 创建脚本**: 自动化创建和配置 GitHub App
-2. ✅ **Webhook 接收器**: 接收 GitHub App 事件，触发主 workflow
-3. ✅ **主 workflow**: 执行 ai-factory 核心逻辑，支持 run/smoke 两种模式
-4. ✅ **需求文档**: 详细的需求分析和架构设计
-5. ✅ **部署指南**: 完整的部署和配置说明
+1. ✅ **轻量级 workflow 方案**: 使用 GitHub Actions 原生功能实现跨仓库触发（新方案）
+2. ✅ **主 workflow**: 执行 ai-factory 核心逻辑，支持 run/smoke 两种模式
+3. ✅ **需求文档**: 详细的需求分析和架构设计
+4. ✅ **部署指南**: 完整的部署和配置说明
+5. ✅ **跨仓库触发指南**: 详细的目标仓库配置说明（详见 [cross-repo-trigger-guide.md](cross-repo-trigger-guide.md)）
+
+**架构优势**:
+- 无需外部服务依赖
+- 目标仓库只需配置一次（1个 workflow 文件 + 1个 secret）
+- 使用 GitHub token 进行认证，安全性好
+- 维护成本低
 
 **下一步**:
-1. 按照部署指南配置 GitHub App 和 Secrets
-2. 运行测试验证功能
+1. 按照 [跨仓库触发方案指南](cross-repo-trigger-guide.md) 配置目标仓库
+2. 配置 ai-factory 仓库的 secrets 和 variables
 3. 部署到生产环境
 4. 监控运行状态并持续优化
 

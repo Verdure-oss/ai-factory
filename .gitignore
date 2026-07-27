@@ -9,3 +9,6 @@ kubeconfig
 # Python build artifacts.
 __pycache__/
 *.py[cod]
+
+# Claude Code
+.claude/
