@@ -54,6 +54,9 @@ jobs:
       LABEL_NAME: ${{ github.event.client_payload.label_name }}
       SENDER: ${{ github.event.client_payload.sender }}
       TRIGGER_TYPE: ${{ github.event.client_payload.trigger_type }}
+      AI_FACTORY_RUN_AGENT_COMMAND: ${{ vars.AI_FACTORY_RUN_AGENT_COMMAND || 'ai-factory-agent openai-compatible' }}
+      AI_FACTORY_RUN_VALIDATION_COMMAND: ${{ vars.AI_FACTORY_RUN_VALIDATION_COMMAND || 'go test ./...' }}
+      FACTORY_SMOKE_COMMAND: test -s /tmp/ai-factory-agent-prompt.txt && test -f factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent
 
     steps:
       - name: Parse event payload
@@ -205,33 +208,55 @@ jobs:
         run: |
           echo "确定 Agent 配置..."
 
-          # 根据触发类型确定配置
+          CHANGE_REQUEST=false
+          AGENT_COMMAND="cat >/tmp/ai-factory-agent-prompt.txt"
+          AGENT_ENV_ARGS=()
+          TASK_COMMAND="${FACTORY_SMOKE_COMMAND}"
+          RESULT_EXPECTATION="FactoryTask to succeed"
+
           if [[ "${TRIGGER_TYPE}" == "smoke" ]]; then
             # 冒烟测试模式
-            AGENT_COMMAND="cat >/tmp/ai-factory-agent-prompt.txt"
-            VALIDATION_COMMAND="test -s /tmp/ai-factory-agent-prompt.txt && test -f ai-factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
-            CHANGE_REQUEST="false"
+            CHANGE_REQUEST=true
+            TASK_COMMAND="mkdir -p .ai-factory/smoke && printf 'issue=%s\nrun=%s\n' '${ISSUE_NUMBER}' '${GITHUB_RUN_ID}' > .ai-factory/smoke/issue-${ISSUE_NUMBER}.txt && ${FACTORY_SMOKE_COMMAND}"
+            RESULT_EXPECTATION="an ai-factory-smoke change request URL or an existing PR status"
             echo "模式: 冒烟测试"
-          else
+          elif [[ "${TRIGGER_TYPE}" == "run" ]]; then
             # 正式运行模式
-            AGENT_COMMAND="${AI_FACTORY_RUN_AGENT_COMMAND:-ai-factory-agent openai-compatible}"
-            VALIDATION_COMMAND="${AI_FACTORY_RUN_VALIDATION_COMMAND:-go test ./...}"
-            CHANGE_REQUEST="true"
+            CHANGE_REQUEST=true
+            AGENT_COMMAND="${AI_FACTORY_RUN_AGENT_COMMAND}"
+            AGENT_ENV_ARGS+=(--agent-env CODEX_API_KEY)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_API_KEY)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_BASE_URL)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_MODEL)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_TEMPERATURE)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_MAX_TOKENS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_MAX_TOOL_ROUNDS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_MAX_FINAL_SCRIPT_ROUNDS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_MAX_REPAIR_ROUNDS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_TOTAL_TIMEOUT_SECONDS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS)
+            AGENT_ENV_ARGS+=(--agent-env OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS)
+            TASK_COMMAND="${AI_FACTORY_RUN_VALIDATION_COMMAND}"
+            RESULT_EXPECTATION="an ai-factory-run change request URL or an existing PR status"
             echo "模式: 正式运行"
           fi
 
           echo "Agent 命令: ${AGENT_COMMAND}"
-          echo "验证命令: ${VALIDATION_COMMAND}"
+          echo "验证命令: ${TASK_COMMAND}"
           echo "创建变更请求: ${CHANGE_REQUEST}"
+          echo "AGENT_ENV_ARGS: ${AGENT_ENV_ARGS[*]}"
 
           echo "agent_command=${AGENT_COMMAND}" >> $GITHUB_OUTPUT
-          echo "validation_command=${VALIDATION_COMMAND}" >> $GITHUB_OUTPUT
+          echo "validation_command=${TASK_COMMAND}" >> $GITHUB_OUTPUT
           echo "change_request=${CHANGE_REQUEST}" >> $GITHUB_OUTPUT
+          echo "agent_env_args=${AGENT_ENV_ARGS[*]}" >> $GITHUB_OUTPUT
 
       - name: Run FactoryTask
         env:
           GITHUB_TOKEN: ${{ secrets.AI_FACTORY_GITHUB_TOKEN || github.token }}
           AI_FACTORY_GITHUB_TOKEN: ${{ secrets.AI_FACTORY_GITHUB_TOKEN || github.token }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.AI_FACTORY_OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ vars.AI_FACTORY_OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
           OPENAI_MODEL: ${{ vars.AI_FACTORY_OPENAI_MODEL || 'gpt-4.1' }}
@@ -276,6 +301,7 @@ jobs:
 
           # 启动 Webhook 服务器
           cd ai-factory
+          eval "AGENT_ENV_ARGS=(${{ steps.agent-config.outputs.agent_env_args }})"
           go run ./factory/cmd/factory task webhook serve \
             --addr 127.0.0.1:8080 \
             --apply \
@@ -286,6 +312,7 @@ jobs:
             --require-label ai-factory \
             --sandbox-template go-dev \
             --agent-command "${{ steps.agent-config.outputs.agent_command }}" \
+            "${AGENT_ENV_ARGS[@]}" \
             --command "${{ steps.agent-config.outputs.validation_command }}" \
             --change-request="${{ steps.agent-config.outputs.change_request }}" \
             --change-request-auth-token-env AI_FACTORY_GITHUB_TOKEN \
