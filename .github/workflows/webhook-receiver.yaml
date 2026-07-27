@@ -29,12 +29,6 @@ permissions:
   actions: write
   issues: read
 
-# 权限配置
-permissions:
-  contents: read
-  actions: write
-  issues: read
-
 # 并发控制
 concurrency:
   group: webhook-receiver-${{ github.event.issue.number }}
