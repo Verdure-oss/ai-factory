@@ -45,6 +45,8 @@ jobs:
     env:
       KIND_CLUSTER_NAME: ai-factory-issue
       AGENT_SANDBOX_SRC: /tmp/agent-sandbox
+      IMAGE_PREFIX: ai-factory
+      IMAGE_TAG: ci
       CODING_AGENT_IMAGE: ai-factory/coding-agent-sandbox:ci
       FACTORY_REPOSITORY: ${{ github.event.client_payload.repository }}
       ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
@@ -144,8 +146,7 @@ jobs:
           echo "安装 agent-sandbox..."
           git clone --depth=1 https://github.com/kubernetes-sigs/agent-sandbox.git "${AGENT_SANDBOX_SRC}"
           cd ai-factory
-          IMAGE_PREFIX=ai-factory IMAGE_TAG=ci KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME}" \
-            AGENT_SANDBOX_SRC="${AGENT_SANDBOX_SRC}" components/agent-sandbox/install
+          components/agent-sandbox/install
           echo "✓ agent-sandbox 安装完成"
 
       - name: Build coding agent sandbox image
