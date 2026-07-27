@@ -1,0 +1,457 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Process Issue
+
+# 触发条件：repository_dispatch 事件
+on:
+  repository_dispatch:
+    types:
+      - issue-labeled
+      - issue-opened
+      - issue-closed
+      - issue-reopened
+
+# 权限配置
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+# 并发控制
+concurrency:
+  group: process-issue-${{ github.event.client_payload.repository }}-${{ github.event.client_payload.issue_number }}
+  cancel-in-progress: true
+
+jobs:
+  # 处理 Issue 事件
+  process-issue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # 环境变量
+    env:
+      KIND_CLUSTER_NAME: ai-factory-issue
+      AGENT_SANDBOX_SRC: /tmp/agent-sandbox
+      CODING_AGENT_IMAGE: ai-factory/coding-agent-sandbox:ci
+      FACTORY_REPOSITORY: ${{ github.event.client_payload.repository }}
+      ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
+      ACTION: ${{ github.event.client_payload.action }}
+      LABEL_NAME: ${{ github.event.client_payload.label_name }}
+      SENDER: ${{ github.event.client_payload.sender }}
+      TRIGGER_TYPE: ${{ github.event.client_payload.trigger_type }}
+
+    steps:
+      - name: Parse event payload
+        id: parse
+        run: |
+          echo "解析事件负载..."
+
+          # 验证必要字段
+          if [[ -z "${FACTORY_REPOSITORY}" ]]; then
+            echo "错误: 缺少 repository 字段"
+            exit 1
+          fi
+
+          if [[ -z "${ISSUE_NUMBER}" ]]; then
+            echo "错误: 缺少 issue_number 字段"
+            exit 1
+          fi
+
+          if [[ -z "${ACTION}" ]]; then
+            echo "错误: 缺少 action 字段"
+            exit 1
+          fi
+
+          # 解析仓库信息
+          REPO_OWNER=$(echo "${FACTORY_REPOSITORY}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${FACTORY_REPOSITORY}" | cut -d'/' -f2)
+
+          echo "仓库: ${FACTORY_REPOSITORY}"
+          echo "所有者: ${REPO_OWNER}"
+          echo "名称: ${REPO_NAME}"
+          echo "Issue: #${ISSUE_NUMBER}"
+          echo "动作: ${ACTION}"
+          echo "标签: ${LABEL_NAME}"
+          echo "触发者: ${SENDER}"
+          echo "触发类型: ${TRIGGER_TYPE}"
+
+          # 设置输出
+          echo "repo_owner=${REPO_OWNER}" >> $GITHUB_OUTPUT
+          echo "repo_name=${REPO_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Checkout ai-factory
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: ai-factory
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ai-factory/go.mod
+          cache-dependency-path: ai-factory/go.sum
+          cache: true
+
+      - name: OpenAI-compatible agent configuration preflight
+        if: env.TRIGGER_TYPE == 'run'
+        env:
+          OPENAI_API_KEY: ${{ secrets.AI_FACTORY_OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.AI_FACTORY_OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+          OPENAI_MODEL: ${{ vars.AI_FACTORY_OPENAI_MODEL || 'gpt-4.1' }}
+          OPENAI_TEMPERATURE: ${{ vars.AI_FACTORY_OPENAI_TEMPERATURE || '1' }}
+          OPENAI_MAX_TOKENS: ${{ vars.AI_FACTORY_OPENAI_MAX_TOKENS || '48000' }}
+          OPENAI_MAX_TOOL_ROUNDS: ${{ vars.AI_FACTORY_OPENAI_MAX_TOOL_ROUNDS || '40' }}
+          OPENAI_MAX_FINAL_SCRIPT_ROUNDS: ${{ vars.AI_FACTORY_OPENAI_MAX_FINAL_SCRIPT_ROUNDS || '5' }}
+          OPENAI_MAX_REPAIR_ROUNDS: ${{ vars.AI_FACTORY_OPENAI_MAX_REPAIR_ROUNDS || '3' }}
+          OPENAI_TOTAL_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_TOTAL_TIMEOUT_SECONDS || '1800' }}
+          OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS || '180' }}
+          OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS || '90' }}
+          OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS || '90' }}
+        run: |
+          echo "检查 OpenAI 配置..."
+          cd ai-factory
+          bash components/agent-sandbox-images/coding-agent/ai-factory-agent openai-compatible --check-config
+          echo "✓ OpenAI 配置检查通过"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+
+      - name: Install FactoryTask CRD
+        run: |
+          echo "安装 FactoryTask CRD..."
+          cd ai-factory
+          components/factory-task/install
+          echo "✓ FactoryTask CRD 安装完成"
+
+      - name: Install agent-sandbox
+        run: |
+          echo "安装 agent-sandbox..."
+          git clone --depth=1 https://github.com/kubernetes-sigs/agent-sandbox.git "${AGENT_SANDBOX_SRC}"
+          cd ai-factory
+          components/agent-sandbox/install
+          echo "✓ agent-sandbox 安装完成"
+
+      - name: Build coding agent sandbox image
+        run: |
+          echo "构建编码 Agent 镜像..."
+          cd ai-factory
+          GO_VERSION="$(awk '/^go / {print $2; exit}' go.mod)"
+          docker build \
+            --build-arg GO_VERSION="${GO_VERSION}" \
+            --build-arg INSTALL_CODEX_CLI=true \
+            -t "${CODING_AGENT_IMAGE}" \
+            components/agent-sandbox-images/coding-agent
+          kind load docker-image "${CODING_AGENT_IMAGE}" --name "${KIND_CLUSTER_NAME}"
+          echo "✓ 编码 Agent 镜像构建完成"
+
+      - name: Create sandbox warm pool
+        run: |
+          echo "创建沙箱预热池..."
+          cat > "${RUNNER_TEMP}/go-dev-sandbox.yaml" <<EOF
+          apiVersion: extensions.agents.x-k8s.io/v1beta1
+          kind: SandboxTemplate
+          metadata:
+            name: go-dev
+            namespace: default
+          spec:
+            envVarsInjectionPolicy: Allowed
+            networkPolicyManagement: Unmanaged
+            podTemplate:
+              spec:
+                containers:
+                - name: dev
+                  image: ${CODING_AGENT_IMAGE}
+                  imagePullPolicy: IfNotPresent
+                  command:
+                  - /bin/bash
+                  - -lc
+                  - mkdir -p /workspace && sleep 3600
+                  workingDir: /workspace
+          ---
+          apiVersion: extensions.agents.x-k8s.io/v1beta1
+          kind: SandboxWarmPool
+          metadata:
+            name: go-dev
+            namespace: default
+          spec:
+            replicas: 1
+            sandboxTemplateRef:
+              name: go-dev
+          EOF
+          kubectl apply -f "${RUNNER_TEMP}/go-dev-sandbox.yaml"
+          kubectl wait sandboxwarmpool go-dev -n default --for=jsonpath='{.status.readyReplicas}'=1 --timeout=180s
+          echo "✓ 沙箱预热池创建完成"
+
+      - name: Determine agent command and validation
+        id: agent-config
+        run: |
+          echo "确定 Agent 配置..."
+
+          # 根据触发类型确定配置
+          if [[ "${TRIGGER_TYPE}" == "smoke" ]]; then
+            # 冒烟测试模式
+            AGENT_COMMAND="cat >/tmp/ai-factory-agent-prompt.txt"
+            VALIDATION_COMMAND="test -s /tmp/ai-factory-agent-prompt.txt && test -f factory/pkg/task/controller.go && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
+            CHANGE_REQUEST="false"
+            echo "模式: 冒烟测试"
+          else
+            # 正式运行模式
+            AGENT_COMMAND="${AI_FACTORY_RUN_AGENT_COMMAND:-ai-factory-agent openai-compatible}"
+            VALIDATION_COMMAND="${AI_FACTORY_RUN_VALIDATION_COMMAND:-go test ./...}"
+            CHANGE_REQUEST="true"
+            echo "模式: 正式运行"
+          fi
+
+          echo "Agent 命令: ${AGENT_COMMAND}"
+          echo "验证命令: ${VALIDATION_COMMAND}"
+          echo "创建变更请求: ${CHANGE_REQUEST}"
+
+          echo "agent_command=${AGENT_COMMAND}" >> $GITHUB_OUTPUT
+          echo "validation_command=${VALIDATION_COMMAND}" >> $GITHUB_OUTPUT
+          echo "change_request=${CHANGE_REQUEST}" >> $GITHUB_OUTPUT
+
+      - name: Run FactoryTask
+        env:
+          GITHUB_TOKEN: ${{ secrets.AI_FACTORY_GITHUB_TOKEN || github.token }}
+          AI_FACTORY_GITHUB_TOKEN: ${{ secrets.AI_FACTORY_GITHUB_TOKEN || github.token }}
+          OPENAI_API_KEY: ${{ secrets.AI_FACTORY_OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.AI_FACTORY_OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+          OPENAI_MODEL: ${{ vars.AI_FACTORY_OPENAI_MODEL || 'gpt-4.1' }}
+          OPENAI_TEMPERATURE: ${{ vars.AI_FACTORY_OPENAI_TEMPERATURE || '1' }}
+          OPENAI_MAX_TOKENS: ${{ vars.AI_FACTORY_OPENAI_MAX_TOKENS || '48000' }}
+          OPENAI_MAX_TOOL_ROUNDS: ${{ vars.AI_FACTORY_OPENAI_MAX_TOOL_ROUNDS || '40' }}
+          OPENAI_MAX_FINAL_SCRIPT_ROUNDS: ${{ vars.AI_FACTORY_OPENAI_MAX_FINAL_SCRIPT_ROUNDS || '5' }}
+          OPENAI_MAX_REPAIR_ROUNDS: ${{ vars.AI_FACTORY_OPENAI_MAX_REPAIR_ROUNDS || '3' }}
+          OPENAI_TOTAL_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_TOTAL_TIMEOUT_SECONDS || '1800' }}
+          OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS || '180' }}
+          OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS || '90' }}
+          OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: ${{ vars.AI_FACTORY_OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS || '90' }}
+        run: |
+          echo "运行 FactoryTask..."
+
+          TASK_REPOSITORY="$(printf '%s' "${FACTORY_REPOSITORY}" | tr '[:upper:]/_' '[:lower:]--')"
+          TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
+
+          echo "任务名称: ${TASK_NAME}"
+          echo "目标仓库: ${FACTORY_REPOSITORY}"
+          echo "Issue 编号: ${ISSUE_NUMBER}"
+
+          # 更新 Issue 状态
+          ensure_issue_label() {
+            gh label create "$1" --color "$2" --description "$3" --force >/dev/null 2>&1 || true
+          }
+
+          ensure_issue_label ai-factory-running 1D76DB "ai-factory is processing this issue"
+          ensure_issue_label ai-factory-done 0E8A16 "ai-factory completed this issue"
+          ensure_issue_label ai-factory-failed B60205 "ai-factory failed this issue"
+
+          gh issue edit "${ISSUE_NUMBER}" \
+            --repo "${FACTORY_REPOSITORY}" \
+            --add-label ai-factory-running \
+            --remove-label ai-factory-done \
+            --remove-label ai-factory-failed || true
+
+          # 添加进度评论
+          RUN_URL="${GITHUB_SERVER_URL}/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}"
+          COMMENT_BODY=$(printf 'ai-factory started processing this issue.\n\n- FactoryTask: %s\n- GitHub Actions run: %s' "${TASK_NAME}" "${RUN_URL}")
+          gh issue comment "${ISSUE_NUMBER}" --repo "${FACTORY_REPOSITORY}" --body "${COMMENT_BODY}"
+
+          # 启动 Webhook 服务器
+          cd ai-factory
+          go run ./factory/cmd/factory task webhook serve \
+            --addr 127.0.0.1:8080 \
+            --apply \
+            --repository "${FACTORY_REPOSITORY}" \
+            --trigger-action opened \
+            --trigger-action reopened \
+            --trigger-action labeled \
+            --require-label ai-factory \
+            --sandbox-template go-dev \
+            --agent-command "${{ steps.agent-config.outputs.agent_command }}" \
+            --command "${{ steps.agent-config.outputs.validation_command }}" \
+            --change-request="${{ steps.agent-config.outputs.change_request }}" \
+            --change-request-auth-token-env AI_FACTORY_GITHUB_TOKEN \
+            --reporting-mode comment \
+            > "${RUNNER_TEMP}/webhook.log" 2>&1 &
+          WEBHOOK_PID=$!
+          trap 'kill "${WEBHOOK_PID}" 2>/dev/null || true' EXIT
+
+          # 构造 GitHub Issue 事件
+          cat > "${RUNNER_TEMP}/github-issue.json" <<EOF
+          {
+            "action": "opened",
+            "issue": {
+              "number": ${ISSUE_NUMBER},
+              "title": "Issue #${ISSUE_NUMBER}",
+              "body": "Processing issue from ${FACTORY_REPOSITORY}",
+              "html_url": "https://github.com/${FACTORY_REPOSITORY}/issues/${ISSUE_NUMBER}",
+              "user": {"login": "${SENDER}"},
+              "labels": [{"name": "ai-factory"}, {"name": "${LABEL_NAME}"}]
+            },
+            "repository": {
+              "full_name": "${FACTORY_REPOSITORY}",
+              "html_url": "https://github.com/${FACTORY_REPOSITORY}",
+              "clone_url": "https://github.com/${FACTORY_REPOSITORY}.git",
+              "default_branch": "main"
+            },
+            "sender": {"login": "${SENDER}"}
+          }
+          EOF
+
+          # 发送 Webhook 请求
+          WEBHOOK_DELIVERED=false
+          for _ in $(seq 1 30); do
+            if curl -fsS -X POST http://127.0.0.1:8080/webhook/github \
+              -H 'Content-Type: application/json' \
+              --data-binary @"${RUNNER_TEMP}/github-issue.json"; then
+              WEBHOOK_DELIVERED=true
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "${WEBHOOK_DELIVERED}" != "true" ]]; then
+            echo "错误: Webhook 请求发送失败"
+            cat "${RUNNER_TEMP}/webhook.log"
+            exit 1
+          fi
+
+          echo "✓ Webhook 请求发送成功"
+
+          # 等待沙箱预热池就绪
+          kubectl wait sandboxwarmpool go-dev -n default --for=jsonpath='{.status.readyReplicas}'=1 --timeout=180s
+
+          # 运行控制器
+          go run ./factory/cmd/factory task controller watch \
+            -n default \
+            --once \
+            --interval=1s \
+            --timeout=180s \
+            --create-change-request="${{ steps.agent-config.outputs.change_request }}" \
+            --report=true
+
+          # 等待任务完成
+          TASK_PHASE=""
+          for _ in $(seq 1 60); do
+            TASK_PHASE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.phase}')"
+            if [[ "${TASK_PHASE}" == "Succeeded" || "${TASK_PHASE}" == "Failed" ]]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ "${TASK_PHASE}" != "Succeeded" ]]; then
+            kubectl get factorytask "${TASK_NAME}" -n default -o yaml
+            echo "错误: FactoryTask 未成功完成，阶段: ${TASK_PHASE:-<empty>}"
+            exit 1
+          fi
+
+          # 验证结果
+          if [[ "${{ steps.agent-config.outputs.change_request }}" == "true" ]]; then
+            LAST_RESULT_URL="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastResultURL}')"
+            LAST_MESSAGE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastMessage}')"
+            if [[ -z "${LAST_RESULT_URL}" && "${LAST_MESSAGE}" != *"Change request already exists"* ]]; then
+              kubectl get factorytask "${TASK_NAME}" -n default -o yaml
+              echo "错误: 未找到变更请求 URL"
+              exit 1
+            fi
+          fi
+
+          echo "✓ FactoryTask 执行成功"
+
+      - name: Update issue status on success
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.AI_FACTORY_GITHUB_TOKEN || github.token }}
+        run: |
+          echo "更新 Issue 状态（成功）..."
+
+          gh issue edit "${ISSUE_NUMBER}" \
+            --repo "${FACTORY_REPOSITORY}" \
+            --add-label ai-factory-done \
+            --remove-label ai-factory-running \
+            --remove-label ai-factory-failed \
+            --remove-label ai-factory-run || true
+
+          # 添加成功评论
+          RUN_URL="${GITHUB_SERVER_URL}/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}"
+          COMMENT_BODY=$(printf 'ai-factory completed processing this issue.\n\n- GitHub Actions run: %s\n- Status: Success' "${RUN_URL}")
+          gh issue comment "${ISSUE_NUMBER}" --repo "${FACTORY_REPOSITORY}" --body "${COMMENT_BODY}"
+
+          echo "✓ Issue 状态更新成功"
+
+      - name: Update issue status on failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.AI_FACTORY_GITHUB_TOKEN || github.token }}
+        run: |
+          echo "更新 Issue 状态（失败）..."
+
+          TASK_REPOSITORY="$(printf '%s' "${FACTORY_REPOSITORY}" | tr '[:upper:]/_' '[:lower:]--')"
+          TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
+
+          # 获取任务状态
+          PHASE=""
+          REASON=""
+          MESSAGE=""
+          if kubectl get factorytask "${TASK_NAME}" -n default >/dev/null 2>&1; then
+            PHASE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+            REASON="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.conditions[-1:].reason}' 2>/dev/null || true)"
+            MESSAGE="$(kubectl get factorytask "${TASK_NAME}" -n default -o jsonpath='{.status.lastMessage}' 2>/dev/null || true)"
+          fi
+
+          if [[ -z "${MESSAGE}" && "${TRIGGER_TYPE}" == "run" && -z "${OPENAI_API_KEY}" ]]; then
+            REASON="MissingOpenAICompatibleAPIKey"
+            MESSAGE="AI_FACTORY_OPENAI_API_KEY repository secret is required."
+          fi
+          if [[ -z "${PHASE}" ]]; then
+            PHASE="WorkflowFailed"
+          fi
+          if [[ -z "${REASON}" ]]; then
+            REASON="WorkflowFailed"
+          fi
+          if [[ -z "${MESSAGE}" ]]; then
+            MESSAGE="Workflow failed before FactoryTask reported a detailed message. Check the Actions run logs."
+          fi
+
+          # 添加失败标签
+          gh label create ai-factory-failed --color B60205 --description "ai-factory failed this issue" --force >/dev/null 2>&1 || true
+          gh issue edit "${ISSUE_NUMBER}" \
+            --repo "${FACTORY_REPOSITORY}" \
+            --add-label ai-factory-failed \
+            --remove-label ai-factory-running \
+            --remove-label ai-factory-done || true
+
+          # 添加失败评论
+          RUN_URL="${GITHUB_SERVER_URL}/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}"
+          COMMENT_BODY=$(printf 'FactoryTask `%s/%s` failed.\n\n- GitHub Actions run: %s\n- Phase: %s\n- Reason: %s\n- Message: %s' "default" "${TASK_NAME}" "${RUN_URL}" "${PHASE}" "${REASON}" "${MESSAGE}")
+          gh issue comment "${ISSUE_NUMBER}" --repo "${FACTORY_REPOSITORY}" --body "${COMMENT_BODY}"
+
+          echo "✓ Issue 状态更新成功（失败）"
+
+      - name: Show FactoryTask status
+        if: always()
+        run: |
+          echo "显示 FactoryTask 状态..."
+          cd ai-factory
+          kubectl get factorytasks,sandboxclaims,sandboxwarmpools,pods -A || true
+
+          TASK_REPOSITORY="$(printf '%s' "${FACTORY_REPOSITORY}" | tr '[:upper:]/_' '[:lower:]--')"
+          TASK_NAME="github-${TASK_REPOSITORY}-${ISSUE_NUMBER}"
+          kubectl get factorytask "${TASK_NAME}" -n default -o yaml || true
