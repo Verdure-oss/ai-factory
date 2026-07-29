@@ -1,0 +1,8 @@
+{{- if and .Values.namespace (ne .Values.namespace .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "ai-factory.namespace" . }}
+  labels:
+    {{- include "ai-factory.labels" . | nindent 4 }}
+{{- end }}

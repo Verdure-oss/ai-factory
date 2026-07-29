@@ -1,0 +1,33 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: go-dev
+  namespace: {{ include "ai-factory.namespace" . }}
+  labels:
+    {{- include "ai-factory.labels" . | nindent 4 }}
+spec:
+  envVarsInjectionPolicy: Allowed
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    spec:
+      containers:
+      - name: {{ .Values.sandbox.containerName }}
+        image: {{ include "ai-factory.sandboxImage" . }}
+        imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
+        command:
+        - /bin/bash
+        - -lc
+        - mkdir -p /workspace && sleep 3600
+        workingDir: /workspace
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: go-dev
+  namespace: {{ include "ai-factory.namespace" . }}
+  labels:
+    {{- include "ai-factory.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.sandbox.warmPoolReplicas }}
+  sandboxTemplateRef:
+    name: go-dev

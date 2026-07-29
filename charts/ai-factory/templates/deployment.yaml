@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-factory-server
+  namespace: {{ include "ai-factory.namespace" . }}
+  labels:
+    {{- include "ai-factory.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.server.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ai-factory.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "ai-factory.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: ai-factory-server
+      containers:
+      - name: server
+        image: {{ include "ai-factory.serverImage" . }}
+        imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+        args:
+        - server
+        - --addr=:8080
+        - --namespace={{ include "ai-factory.namespace" . }}
+        - --agent={{ .Values.agent.name }}
+        - --agent-command={{ .Values.agent.command }}
+        - --sandbox-template=go-dev
+        - --watch-interval={{ .Values.watchInterval }}
+        - --task-timeout={{ .Values.taskTimeout }}
+        - --change-request={{ .Values.changeRequestEnabled }}
+        - --report={{ .Values.reportEnabled }}
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: ai-factory-credentials
+              key: WEBHOOK_SECRET
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ai-factory-credentials
+              key: GITHUB_TOKEN
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-factory-credentials
+              key: OPENAI_API_KEY
+        livenessProbe:
+          {{- toYaml .Values.server.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.server.readinessProbe | nindent 10 }}
+        resources:
+          {{- toYaml .Values.server.resources | nindent 10 }}

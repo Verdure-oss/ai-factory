@@ -1,0 +1,111 @@
+# ai-factory Helm Chart Values
+
+# Server configuration
+server:
+  # Server image
+  image:
+    repository: ai-factory-server
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Server replica count
+  replicaCount: 1
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 80
+
+  # Ingress configuration
+  ingress:
+    enabled: false
+    className: nginx
+    annotations: {}
+    hosts:
+      - host: ai-factory.example.com
+        paths:
+          - path: /webhook
+            pathType: Prefix
+          - path: /healthz
+            pathType: Exact
+    tls: []
+    #  - secretName: ai-factory-tls
+    #    hosts:
+    #      - ai-factory.example.com
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Liveness probe
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+  # Readiness probe
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+# Sandbox configuration
+sandbox:
+  # Sandbox image (coding agent)
+  image:
+    repository: coding-agent-sandbox
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Warm pool replicas
+  warmPoolReplicas: 2
+
+  # Container name in sandbox
+  containerName: dev
+
+# Agent configuration
+agent:
+  # Agent name
+  name: builder
+
+  # Agent command
+  command: "ai-factory-agent openai-compatible"
+
+# Webhook configuration
+webhook:
+  # Webhook secret (set via --set or in secret)
+  secret: ""
+
+# GitHub configuration
+github:
+  # GitHub token (set via --set or in secret)
+  token: ""
+
+# OpenAI configuration
+openai:
+  # OpenAI API key (set via --set or in secret)
+  apiKey: ""
+
+# Namespace
+namespace: ai-factory
+
+# Watch interval for controller
+watchInterval: 15s
+
+# Task timeout
+taskTimeout: 30m
+
+# Enable change request (PR creation)
+changeRequestEnabled: true
+
+# Enable reporting (issue comments)
+reportEnabled: true

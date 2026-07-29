@@ -20,6 +20,7 @@ import (
 	"os"
 
 	"github.com/ai-on-gke/ai-factory/factory/cmd/factory/runtime"
+	"github.com/ai-on-gke/ai-factory/factory/cmd/factory/server"
 	"github.com/ai-on-gke/ai-factory/factory/cmd/factory/task"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +37,7 @@ var rootCmd = &cobra.Command{
 func main() {
 	rootCmd.AddCommand(runtime.Cmd)
 	rootCmd.AddCommand(task.Cmd)
+	rootCmd.AddCommand(server.Cmd)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)

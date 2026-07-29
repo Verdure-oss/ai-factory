@@ -1,0 +1,43 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-factory-server
+  labels:
+    app: ai-factory-server
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims/status"]
+  verbs: ["get"]
+- apiGroups: ["factory.ai.gke.io"]
+  resources: ["factorytasks"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["factory.ai.gke.io"]
+  resources: ["factorytasks/status"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ai-factory-server
+  labels:
+    app: ai-factory-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ai-factory-server
+subjects:
+- kind: ServiceAccount
+  name: ai-factory-server
+  namespace: ai-factory
