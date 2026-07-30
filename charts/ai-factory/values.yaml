@@ -77,8 +77,19 @@ agent:
   # Agent name
   name: builder
 
-  # Agent command
+  # Agent command for run mode
   command: "ai-factory-agent openai-compatible"
+
+  # Agent command for smoke mode (no-op: writes prompt to file without calling LLM)
+  smokeCommand: "cat >/tmp/ai-factory-agent-prompt.txt"
+
+  # Smoke commands (run in sandbox to verify environment)
+  smokeCommands:
+    - "test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
+
+  # Validation commands for run mode
+  validationCommands:
+    - "go test ./..."
 
 # Webhook configuration
 webhook:
@@ -94,9 +105,37 @@ github:
 openai:
   # OpenAI API key (set via --set or in secret)
   apiKey: ""
+  # Codex API key (optional, for Codex CLI)
+  codexApiKey: ""
+  # OpenAI-compatible base URL
+  baseUrl: "https://api.openai.com/v1"
+  # Model name
+  model: "gpt-4.1"
+  # Temperature
+  temperature: "1"
+  # Max tokens
+  maxTokens: "48000"
+  # Max tool rounds
+  maxToolRounds: "40"
+  # Max final script rounds
+  maxFinalScriptRounds: "5"
+  # Max repair rounds
+  maxRepairRounds: "3"
+  # Total timeout in seconds
+  totalTimeoutSeconds: "1800"
+  # Exploration request timeout in seconds
+  explorationRequestTimeoutSeconds: "180"
+  # Final request timeout in seconds
+  finalRequestTimeoutSeconds: "90"
+  # Repair request timeout in seconds
+  repairRequestTimeoutSeconds: "90"
 
 # Namespace
 namespace: ai-factory
+
+# Git proxy URL (optional, e.g. http://proxy:port)
+# When set, the controller configures git to use this proxy for HTTPS operations.
+gitProxy: ""
 
 # Watch interval for controller
 watchInterval: 15s

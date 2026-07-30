@@ -94,6 +94,10 @@ func Reconcile(task *FactoryTask) (*ReconcileOutput, error) {
 			appendSandboxEnv(claim.Spec, plan.ContainerName, envName, value)
 		}
 	}
+	// Inject git proxy if configured (used by plan step "configure git proxy")
+	if proxy := os.Getenv("AI_FACTORY_GIT_PROXY"); proxy != "" {
+		appendSandboxEnv(claim.Spec, plan.ContainerName, "AI_FACTORY_GIT_PROXY", proxy)
+	}
 
 	return &ReconcileOutput{
 		Plan:         plan,

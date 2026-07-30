@@ -94,8 +94,12 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 		WorkDir:         workDir,
 		Steps: []ExecutionStep{
 			{
+				Name:    "clean workspace",
+				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("rm -rf %s && mkdir -p %s", shellQuote(workDir), shellQuote("/workspace"))},
+			},
+			{
 				Name:    "clone repository",
-				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("mkdir -p %s && git clone %s %s", shellQuote("/workspace"), shellQuote(cloneURL), shellQuote(workDir))},
+				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("git clone %s %s", shellQuote(cloneURL), shellQuote(workDir))},
 			},
 			{
 				Name:    "checkout base ref",
@@ -113,6 +117,10 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 			{
 				Name:    "configure git credentials",
 				Command: []string{"/bin/sh", "-lc", configureGitCredentialsScript(host, authTokenEnv, authUsername)},
+			},
+			{
+				Name:    "configure git proxy",
+				Command: []string{"/bin/sh", "-lc", configureGitProxyScript()},
 			},
 		}, plan.Steps...)
 		plan.Steps = append(plan.Steps, ExecutionStep{
@@ -288,6 +296,18 @@ git config --global %s "$HELPER"`,
 		tokenEnv,
 		shellQuote(fmt.Sprintf("credential.https://%s.helper", host)),
 	)
+}
+
+func configureGitProxyScript() string {
+	return `set -eu
+PROXY_URL="${AI_FACTORY_GIT_PROXY:-}"
+if [ -n "$PROXY_URL" ]; then
+  git config --global http.proxy "$PROXY_URL"
+  git config --global https.proxy "$PROXY_URL"
+  echo "git proxy configured: $PROXY_URL"
+else
+  echo "no git proxy configured (AI_FACTORY_GIT_PROXY not set)"
+fi`
 }
 
 func cloneHost(cloneURL string) (string, error) {
