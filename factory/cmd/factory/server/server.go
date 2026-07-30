@@ -173,7 +173,28 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
-		task, err := taskpkg.FactoryTaskFromIssueWebhook(body, webhookOptions(provider))
+
+		// Parse event to check labels
+		event, err := taskpkg.ParseIssueWebhook(body, provider)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Determine if this is a smoke test or full run
+		isSmoke := hasLabel(event.Labels, "ai-factory-smoke")
+
+		// Get options and modify for smoke test
+		webhookOpts := webhookOptions(provider)
+		if isSmoke {
+			// Smoke test: skip agent, only run validation
+			fmt.Fprintf(cmd.ErrOrStderr(), "webhook: smoke test detected, skipping agent execution\n")
+			webhookOpts.AgentCommand = "echo 'smoke test - skipping agent execution'"
+			webhookOpts.Commands = []string{"go version && git version && echo 'smoke test passed'"}
+			webhookOpts.ChangeRequestEnabled = false
+		}
+
+		task, err := taskpkg.FactoryTaskFromIssueWebhook(body, webhookOpts)
 		if err != nil {
 			if ignored, ok := err.(*taskpkg.IgnoredIssueWebhookError); ok {
 				w.Header().Set("Content-Type", "application/json")
@@ -199,7 +220,7 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s (exists=%v)\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name, alreadyExists)
+		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s (smoke=%v, exists=%v)\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name, isSmoke, alreadyExists)
 
 		// Only set labels on first creation (not on re-trigger)
 		if !alreadyExists && provider == taskpkg.ProviderGitHub {
@@ -209,14 +230,28 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 				issueNum := 0
 				fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
 				if repo != "" && issueNum > 0 {
-					_ = gh.SetTaskRunning(req.Context(), repo, issueNum)
+					ctx := req.Context()
+					// Set task running label
+					_ = gh.SetTaskRunning(ctx, repo, issueNum)
+					// Post started comment
+					comment := fmt.Sprintf("ai-factory started processing this issue.\n\n- FactoryTask: %s/%s\n- Type: %s", namespaceForTask(task), task.Metadata.Name, map[bool]string{true: "smoke test", false: "full run"}[isSmoke])
+					_ = gh.PostComment(ctx, repo, issueNum, comment)
 				}
 			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","alreadyExists":%v}`+"\n", task.Metadata.Name, namespaceForTask(task), alreadyExists)
+		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","smoke":%t,"alreadyExists":%v}`+"\n", task.Metadata.Name, namespaceForTask(task), isSmoke, alreadyExists)
 	}
+}
+
+func hasLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if label == target {
+			return true
+		}
+	}
+	return false
 }
 
 func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
