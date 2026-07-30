@@ -99,7 +99,7 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 			},
 			{
 				Name:    "clone repository",
-				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("git clone %s %s", shellQuote(cloneURL), shellQuote(workDir))},
+				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("git -c http.version=HTTP/1.1 clone %s %s", shellQuote(cloneURL), shellQuote(workDir))},
 			},
 			{
 				Name:    "checkout base ref",
@@ -215,7 +215,7 @@ func commitChangesScript(workDir, commitMessage, authorName, authorEmail string)
 }
 
 func pushChangeBranchScript(workDir, remoteName, branchName, targetBranch string) string {
-	return fmt.Sprintf("cd %s && if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse %s)\" ]; then echo 'No change branch push needed'; else git push --force-with-lease -u %s %s; fi", shellQuote(workDir), shellQuote(targetBranch), shellQuote(remoteName), shellQuote(branchName))
+	return fmt.Sprintf("cd %s && if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse %s)\" ]; then echo 'No change branch push needed'; else git -c http.version=HTTP/1.1 push --force-with-lease -u %s %s; fi", shellQuote(workDir), shellQuote(targetBranch), shellQuote(remoteName), shellQuote(branchName))
 }
 
 func runAgentScript(workDir, instructions, promptRef, agentCommand string) string {
