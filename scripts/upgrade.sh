@@ -1,8 +1,9 @@
 #!/bin/bash
-# 升级脚本：导入新镜像并滚动重启服务
+# 升级脚本：导入镜像、升级 Helm chart、重建 sandbox
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NAMESPACE="${NAMESPACE:-ai-factory}"
 
 echo "=== ai-factory 升级脚本 ==="
@@ -40,27 +41,52 @@ import_image() {
     echo "   ✓ ${image_name}"
 }
 
-import_image "${SCRIPT_DIR}/../dist/ai-factory-server.tar" "ai-factory-server"
-import_image "${SCRIPT_DIR}/../dist/coding-agent-sandbox.tar" "coding-agent-sandbox"
-import_image "${SCRIPT_DIR}/../dist/agent-sandbox-controller.tar" "agent-sandbox-controller"
+import_image "${ROOT_DIR}/dist/ai-factory-server.tar" "ai-factory-server"
+import_image "${ROOT_DIR}/dist/coding-agent-sandbox.tar" "coding-agent-sandbox"
+import_image "${ROOT_DIR}/dist/agent-sandbox-controller.tar" "agent-sandbox-controller"
 
-# 2. 滚动重启 server
+# 2. 升级 Helm chart（应用新的 values.yaml 配置）
 echo ""
-echo "2. 滚动重启 ai-factory-server..."
-kubectl rollout restart deployment/ai-factory-server -n "${NAMESPACE}"
+echo "2. 升级 Helm chart..."
+
+# 从现有 secret 读取凭证
+GITHUB_TOKEN=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.GITHUB_TOKEN}' 2>/dev/null | base64 -d || echo "")
+WEBHOOK_SECRET=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.WEBHOOK_SECRET}' 2>/dev/null | base64 -d || echo "")
+OPENAI_API_KEY=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.OPENAI_API_KEY}' 2>/dev/null | base64 -d || echo "")
+CODEX_API_KEY=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.CODEX_API_KEY}' 2>/dev/null | base64 -d || echo "")
+
+CHART_PATH="${ROOT_DIR}/charts/ai-factory"
+if [ ! -d "${CHART_PATH}" ]; then
+    echo "   错误: chart 目录未找到: ${CHART_PATH}"
+    exit 1
+fi
+
+helm upgrade --install ai-factory "${CHART_PATH}" \
+    --namespace "${NAMESPACE}" \
+    --create-namespace \
+    --set github.token="${GITHUB_TOKEN}" \
+    --set webhook.secret="${WEBHOOK_SECRET}" \
+    --set openai.apiKey="${OPENAI_API_KEY}" \
+    --set openai.codexApiKey="${CODEX_API_KEY}"
+
+echo "   ✓ Helm chart 已升级"
+
+# 3. 等待 server 就绪
+echo ""
+echo "3. 等待 ai-factory-server 就绪..."
 kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
 
-# 3. 重建 sandbox warm pool pods（使用新镜像）
+# 4. 重建 sandbox warm pool pods（使用新镜像）
 echo ""
-echo "3. 重建 sandbox pods..."
-OLD_PODS=$(kubectl get pods -n "${NAMESPACE}" -o name | grep go-dev || true)
+echo "4. 重建 sandbox pods..."
+OLD_PODS=$(kubectl get pods -n "${NAMESPACE}" -o name 2>/dev/null | grep go-dev || true)
 if [ -n "${OLD_PODS}" ]; then
     echo "${OLD_PODS}" | xargs kubectl delete -n "${NAMESPACE}" 2>/dev/null || true
-    sleep 10
+    sleep 15
 fi
 echo "   ✓ 等待 warm pool 重建..."
 
-# 4. 显示状态
+# 5. 显示状态
 echo ""
 echo "=== 升级完成 ==="
 echo ""
