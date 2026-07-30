@@ -171,7 +171,7 @@ kubectl get sandboxwarmpool -n "${NAMESPACE}" 2>/dev/null || echo "  (等待初�
 echo ""
 echo "下一步:"
 echo "  1. 暴露服务:"
-echo "     kubectl port-forward svc/ai-factory-server 8080:80 -n ${NAMESPACE}"
+echo "     kubectl port-forward --address=0.0.0.0 svc/ai-factory-server 8080:80 -n ${NAMESPACE}"
 echo "     # 或配置 Ingress/NodePort 对外暴露"
 echo ""
 echo "  2. 检查日志:"
