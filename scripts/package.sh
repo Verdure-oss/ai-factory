@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/dist"
+AGENT_SANDBOX_REPO="https://github.com/kubernetes-sigs/agent-sandbox.git"
 
 echo "=== ai-factory 打包脚本 ==="
 echo ""
@@ -29,8 +30,29 @@ docker build \
 docker save coding-agent-sandbox:latest > "${OUTPUT_DIR}/coding-agent-sandbox.tar"
 echo "   ✓ coding-agent-sandbox.tar"
 
-# 3. 打包 Helm chart
-echo "3. 打包 Helm chart..."
+# 3. 构建 agent-sandbox-controller 镜像
+echo "3. 构建 agent-sandbox-controller 镜像..."
+AGENT_SANDBOX_SRC="${AGENT_SANDBOX_SRC:-}"
+CLEANUP_SANDBOX_SRC=false
+if [[ -z "${AGENT_SANDBOX_SRC}" ]]; then
+    AGENT_SANDBOX_SRC=$(mktemp -d)
+    CLEANUP_SANDBOX_SRC=true
+    echo "   克隆 agent-sandbox 仓库..."
+    git clone --depth=1 "${AGENT_SANDBOX_REPO}" "${AGENT_SANDBOX_SRC}"
+fi
+IMAGE_PREFIX="ai-factory" IMAGE_TAG="latest" \
+    "${AGENT_SANDBOX_SRC}/dev/tools/push-images" \
+    --image-prefix="ai-factory" \
+    --image-tag="latest" \
+    --controller-only
+docker save ai-factory/agent-sandbox-controller:latest > "${OUTPUT_DIR}/agent-sandbox-controller.tar"
+echo "   ✓ agent-sandbox-controller.tar"
+if [[ "${CLEANUP_SANDBOX_SRC}" == "true" ]]; then
+    rm -rf "${AGENT_SANDBOX_SRC}"
+fi
+
+# 4. 打包 Helm chart
+echo "4. 打包 Helm chart..."
 if command -v helm &> /dev/null; then
     helm package "${ROOT_DIR}/charts/ai-factory" -d "${OUTPUT_DIR}"
     echo "   ✓ ai-factory-*.tgz"
@@ -40,14 +62,14 @@ else
     echo "   ✓ ai-factory-chart/"
 fi
 
-# 4. 复制部署脚本
-echo "4. 复制部署脚本..."
+# 5. 复制部署脚本
+echo "5. 复制部署脚本..."
 cp "${ROOT_DIR}/scripts/deploy-remote.sh" "${OUTPUT_DIR}/"
 chmod +x "${OUTPUT_DIR}/deploy-remote.sh"
 echo "   ✓ deploy-remote.sh"
 
-# 5. 复制 CRD 安装脚本
-echo "5. 复制 CRD 安装脚本..."
+# 6. 复制 CRD 安装脚本
+echo "6. 复制 CRD 安装脚本..."
 mkdir -p "${OUTPUT_DIR}/components"
 cp -r "${ROOT_DIR}/components/factory-task" "${OUTPUT_DIR}/components/" 2>/dev/null || true
 cp -r "${ROOT_DIR}/components/agent-sandbox" "${OUTPUT_DIR}/components/" 2>/dev/null || true

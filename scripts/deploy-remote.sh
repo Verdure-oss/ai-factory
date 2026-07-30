@@ -72,6 +72,7 @@ import_image() {
 
 import_image "${SCRIPT_DIR}/ai-factory-server.tar" "ai-factory-server"
 import_image "${SCRIPT_DIR}/coding-agent-sandbox.tar" "coding-agent-sandbox"
+import_image "${SCRIPT_DIR}/agent-sandbox-controller.tar" "agent-sandbox-controller"
 
 # 如果是 kind 集群，需要加载到 kind
 if command -v kind &> /dev/null; then
@@ -82,6 +83,7 @@ if command -v kind &> /dev/null; then
         echo "加载镜像到 kind..."
         kind load docker-image ai-factory-server:latest --name "${CLUSTER_NAME}" 2>/dev/null || true
         kind load docker-image coding-agent-sandbox:latest --name "${CLUSTER_NAME}" 2>/dev/null || true
+        kind load docker-image ai-factory/agent-sandbox-controller:latest --name "${CLUSTER_NAME}" 2>/dev/null || true
         echo "   ✓ 镜像已加载到 kind"
     fi
 fi
@@ -98,6 +100,10 @@ else
 fi
 
 if [ -d "${SCRIPT_DIR}/components/agent-sandbox" ] && [ -f "${SCRIPT_DIR}/components/agent-sandbox/install" ]; then
+    # 镜像已预构建并导入，跳过构建只部署 CRD manifests
+    export AGENT_SANDBOX_BUILD_IMAGES=false
+    export IMAGE_PREFIX="ai-factory/"
+    export IMAGE_TAG="latest"
     "${SCRIPT_DIR}/components/agent-sandbox/install"
     echo "   ✓ agent-sandbox CRD"
 else
