@@ -289,7 +289,12 @@ get)
 esac
 EOF
 chmod 700 "$HELPER"
-git config --global %s "$HELPER"`,
+git config --global %s "$HELPER"
+PROXY_URL="${AI_FACTORY_GIT_PROXY:-}"
+if [ -n "$PROXY_URL" ]; then
+  PROXY_HOST=$(echo "$PROXY_URL" | sed 's|https\?://||;s|/.*||')
+  git config --global "credential.https://${PROXY_HOST}.helper" "$HELPER"
+fi`,
 		shellQuote(tokenEnv),
 		tokenEnv,
 		shellQuote(username),
@@ -302,9 +307,8 @@ func configureGitProxyScript() string {
 	return `set -eu
 PROXY_URL="${AI_FACTORY_GIT_PROXY:-}"
 if [ -n "$PROXY_URL" ]; then
-  git config --global http.proxy "$PROXY_URL"
-  git config --global https.proxy "$PROXY_URL"
-  echo "git proxy configured: $PROXY_URL"
+  git config --global url."${PROXY_URL}/https://github.com/".insteadOf "https://github.com/"
+  echo "git proxy configured: $PROXY_URL -> github.com"
 else
   echo "no git proxy configured (AI_FACTORY_GIT_PROXY not set)"
 fi`
