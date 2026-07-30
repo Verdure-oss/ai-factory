@@ -289,13 +289,7 @@ get)
 esac
 EOF
 chmod 700 "$HELPER"
-git config --global %s "$HELPER"
-# Also configure credentials for proxy host if AI_FACTORY_GIT_PROXY is set
-PROXY_URL="${AI_FACTORY_GIT_PROXY:-}"
-if [ -n "$PROXY_URL" ]; then
-  PROXY_HOST=$(echo "$PROXY_URL" | sed 's|https\?://||;s|/.*||')
-  git config --global "credential.https://${PROXY_HOST}.helper" "$HELPER"
-fi`,
+git config --global %s "$HELPER"`,
 		shellQuote(tokenEnv),
 		tokenEnv,
 		shellQuote(username),
@@ -308,9 +302,9 @@ func configureGitProxyScript() string {
 	return `set -eu
 PROXY_URL="${AI_FACTORY_GIT_PROXY:-}"
 if [ -n "$PROXY_URL" ]; then
-  # URL-rewriting proxy (e.g. https://ghfast.top) — rewrite GitHub URLs to go through proxy
-  git config --global url."${PROXY_URL}/https://github.com/".insteadOf "https://github.com/"
-  echo "git proxy configured (URL rewrite): $PROXY_URL -> github.com"
+  git config --global http.proxy "$PROXY_URL"
+  git config --global https.proxy "$PROXY_URL"
+  echo "git proxy configured: $PROXY_URL"
 else
   echo "no git proxy configured (AI_FACTORY_GIT_PROXY not set)"
 fi`
