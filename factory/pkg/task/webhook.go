@@ -49,7 +49,8 @@ type IssueWebhookOptions struct {
 	Commands                  []string // validation commands for run mode
 	SmokeCommands             []string // commands for smoke mode
 	TriggerActions            []string
-	RequiredLabels            []string
+	RequiredLabels            []string // OR: event must have at least one of these
+	RequireAllOf              []string // AND: event must have all of these
 	Repositories              []string
 	ChangeRequestEnabled      bool
 	ChangeRequestPushOnly     bool
@@ -197,6 +198,9 @@ func ShouldTriggerIssue(event *IssueWebhookEvent, opts IssueWebhookOptions) (boo
 	}
 	if len(opts.RequiredLabels) > 0 && !hasAnyLabel(event.Labels, opts.RequiredLabels) {
 		return false, fmt.Sprintf("ignored issue without required label %q", strings.Join(opts.RequiredLabels, ","))
+	}
+	if len(opts.RequireAllOf) > 0 && !hasAllLabels(event.Labels, opts.RequireAllOf) {
+		return false, fmt.Sprintf("issue missing required label %q", strings.Join(opts.RequireAllOf, ","))
 	}
 	return true, ""
 }
@@ -499,6 +503,22 @@ func hasAnyLabel(labels []string, required []string) bool {
 		}
 	}
 	return false
+}
+
+func hasAllLabels(labels []string, required []string) bool {
+	for _, req := range required {
+		found := false
+		for _, label := range labels {
+			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(req)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func githubLabels(raw githubIssueWebhook) []string {

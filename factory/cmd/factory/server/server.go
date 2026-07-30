@@ -185,6 +185,11 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Check if this FactoryTask already exists and is being processed.
+		// This prevents duplicate processing when setting labels triggers new webhook events.
+		alreadyExists := factoryTaskExists(namespaceForTask(task), task.Metadata.Name)
+
 		data, err := taskpkg.FactoryTaskYAML(task)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -194,10 +199,10 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name)
+		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s (exists=%v)\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name, alreadyExists)
 
-		// Update labels for GitHub (no comment here — controller posts it to avoid duplicates)
-		if provider == taskpkg.ProviderGitHub {
+		// Only set labels on first creation (not on re-trigger)
+		if !alreadyExists && provider == taskpkg.ProviderGitHub {
 			gh := NewGitHubClient()
 			if gh.HasToken() && task.Spec.Trigger.URL != "" {
 				repo := task.Spec.Source.Repository
@@ -210,7 +215,7 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s"}`+"\n", task.Metadata.Name, namespaceForTask(task))
+		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","alreadyExists":%v}`+"\n", task.Metadata.Name, namespaceForTask(task), alreadyExists)
 	}
 }
 
@@ -229,6 +234,7 @@ func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
 		SmokeCommands:        opts.SmokeCommands,
 		TriggerActions:       []string{"labeled"},
 		RequiredLabels:       []string{"ai-factory-run", "ai-factory-smoke"},
+		RequireAllOf:         []string{"ai-factory"},
 		ChangeRequestEnabled: opts.EnableChangeRequest,
 	}
 }

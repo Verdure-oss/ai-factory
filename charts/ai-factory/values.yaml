@@ -84,8 +84,9 @@ agent:
   smokeCommand: "cat >/tmp/ai-factory-agent-prompt.txt"
 
   # Smoke commands (run in sandbox to verify environment and create marker file)
+  # Mirrors FACTORY_SMOKE_COMMAND from .github/workflows/issue-factorytask.yaml
   smokeCommands:
-    - "mkdir -p .ai-factory/smoke && echo smoke-$(date +%s) > .ai-factory/smoke/placeholder.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
+    - "mkdir -p .ai-factory/smoke && echo smoke-$(date +%s) > .ai-factory/smoke/placeholder.txt && test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
 
   # Validation commands for run mode
   validationCommands:

@@ -539,6 +539,11 @@ func listFactoryTasks(namespace string) ([]taskpkg.FactoryTask, error) {
 	return list.Items, nil
 }
 
+func factoryTaskExists(namespace, name string) bool {
+	_, err := kubectlOutput("get", "factorytask", name, "-n", namespace)
+	return err == nil
+}
+
 func namespaceForTask(task *taskpkg.FactoryTask) string {
 	if task.Metadata.Namespace == "" {
 		return "default"
