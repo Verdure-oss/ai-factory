@@ -185,6 +185,11 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Check if this FactoryTask already exists and is being processed.
+		// This prevents duplicate processing when setting labels triggers new webhook events.
+		alreadyExists := factoryTaskExists(namespaceForTask(task), task.Metadata.Name)
+
 		data, err := taskpkg.FactoryTaskYAML(task)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -194,29 +199,23 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name)
+		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s (exists=%v)\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name, alreadyExists)
 
-		// Update labels and post comment for GitHub
-		if provider == taskpkg.ProviderGitHub {
+		// Only set labels on first creation (not on re-trigger)
+		if !alreadyExists && provider == taskpkg.ProviderGitHub {
 			gh := NewGitHubClient()
 			if gh.HasToken() && task.Spec.Trigger.URL != "" {
-				// Extract repo and issue number from trigger info
 				repo := task.Spec.Source.Repository
 				issueNum := 0
 				fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
 				if repo != "" && issueNum > 0 {
-					ctx := req.Context()
-					// Set task running label
-					_ = gh.SetTaskRunning(ctx, repo, issueNum)
-					// Post started comment
-					comment := fmt.Sprintf("ai-factory started processing this issue.\n\n- FactoryTask: %s/%s", namespaceForTask(task), task.Metadata.Name)
-					_ = gh.PostComment(ctx, repo, issueNum, comment)
+					_ = gh.SetTaskRunning(req.Context(), repo, issueNum)
 				}
 			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s"}`+"\n", task.Metadata.Name, namespaceForTask(task))
+		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","alreadyExists":%v}`+"\n", task.Metadata.Name, namespaceForTask(task), alreadyExists)
 	}
 }
 
@@ -235,6 +234,7 @@ func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
 		SmokeCommands:        opts.SmokeCommands,
 		TriggerActions:       []string{"labeled"},
 		RequiredLabels:       []string{"ai-factory-run", "ai-factory-smoke"},
+		RequireAllOf:         []string{"ai-factory"},
 		ChangeRequestEnabled: opts.EnableChangeRequest,
 	}
 }
