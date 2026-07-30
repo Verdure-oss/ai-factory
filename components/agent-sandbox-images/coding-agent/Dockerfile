@@ -21,6 +21,7 @@ ARG GO_VERSION=1.25.4
 ENV HOME=/home/agent \
     WORKSPACE=/workspace \
     PATH=/usr/local/go/bin:$PATH \
+    PYTHONPATH="/usr/local/bin:${PYTHONPATH}" \
     npm_config_update_notifier=false \
     npm_config_fund=false \
     npm_config_audit=false
@@ -72,6 +73,14 @@ COPY repair_loop.py /usr/local/bin/repair_loop.py
 COPY repair_prompt.py /usr/local/bin/repair_prompt.py
 COPY script_validation.py /usr/local/bin/script_validation.py
 COPY entrypoint.sh /usr/local/bin/ai-factory-sandbox-entrypoint
+
+RUN sed -i 's/\r$//' /usr/local/bin/ai-factory-agent \
+    /usr/local/bin/ai-factory-agent.py \
+    /usr/local/bin/agent_budget.py \
+    /usr/local/bin/agent_config.py \
+    /usr/local/bin/repair_loop.py \
+    /usr/local/bin/repair_prompt.py \
+    /usr/local/bin/script_validation.py
 
 RUN chmod 755 /usr/local/bin/ai-factory-agent /usr/local/bin/ai-factory-agent.py /usr/local/bin/agent_budget.py /usr/local/bin/agent_config.py /usr/local/bin/repair_loop.py /usr/local/bin/script_validation.py /usr/local/bin/ai-factory-sandbox-entrypoint \
     && useradd --create-home --home-dir "${HOME}" --shell /bin/bash agent \

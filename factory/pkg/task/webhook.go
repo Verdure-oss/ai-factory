@@ -40,12 +40,14 @@ type IssueWebhookOptions struct {
 	Namespace                 string
 	AgentName                 string
 	AgentCommand              string
+	SmokeAgentCommand         string   // agent command for smoke mode (ai-factory-smoke label)
 	AgentEnv                  []string
 	PromptRef                 string
 	SandboxTemplateRef        string
 	ContainerName             string
 	ReportingMode             string
-	Commands                  []string
+	Commands                  []string // validation commands for run mode
+	SmokeCommands             []string // commands for smoke mode
 	TriggerActions            []string
 	RequiredLabels            []string
 	Repositories              []string
@@ -107,6 +109,21 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 		branch = "main"
 	}
 
+	// Determine agent command and commands based on trigger label.
+	// Smoke mode uses a no-op agent command and smoke-specific validation commands.
+	// Run mode uses the full agent command and validation commands.
+	isSmoke := hasAnyLabel(event.Labels, []string{"ai-factory-smoke"})
+	agentCommand := opts.AgentCommand
+	agentEnv := opts.AgentEnv
+	commands := opts.Commands
+	if isSmoke {
+		if opts.SmokeAgentCommand != "" {
+			agentCommand = opts.SmokeAgentCommand
+		}
+		agentEnv = nil // smoke mode does not need LLM-related env vars
+		commands = opts.SmokeCommands
+	}
+
 	task := &FactoryTask{
 		APIVersion: APIVersion,
 		Kind:       Kind,
@@ -135,8 +152,8 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 			Agent: AgentSpec{
 				Name:      agentName,
 				PromptRef: opts.PromptRef,
-				Command:   opts.AgentCommand,
-				Env:       opts.AgentEnv,
+				Command:   agentCommand,
+				Env:       agentEnv,
 			},
 			Sandbox: SandboxSpec{
 				TemplateRef:   sandboxTemplate,
@@ -144,7 +161,7 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 			},
 			Work: WorkSpec{
 				Instructions: issueInstructions(event),
-				Commands:     opts.Commands,
+				Commands:     commands,
 			},
 			Reporting: ReportingSpec{
 				Provider:  event.Provider,

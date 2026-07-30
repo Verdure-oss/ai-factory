@@ -144,9 +144,9 @@ echo "   使用 chart: ${CHART_PATH}"
 helm upgrade --install ai-factory "${CHART_PATH}" \
     --namespace "${NAMESPACE}" \
     --create-namespace \
-    --set githubToken="${GITHUB_TOKEN}" \
-    --set webhookSecret="${WEBHOOK_SECRET}" \
-    --set openaiApiKey="${OPENAI_API_KEY}"
+    --set github.token="${GITHUB_TOKEN}" \
+    --set webhook.secret="${WEBHOOK_SECRET}" \
+    --set openai.apiKey="${OPENAI_API_KEY}"
 
 # 5. 等待部署完成
 echo ""

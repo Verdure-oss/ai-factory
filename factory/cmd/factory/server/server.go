@@ -36,9 +36,12 @@ type Options struct {
 	WebhookSecret       string
 	AgentName           string
 	AgentCommand        string
+	SmokeAgentCommand   string
 	AgentEnv            []string
 	SandboxTemplateRef  string
 	ContainerName       string
+	SmokeCommands       []string
+	ValidationCommands  []string
 	WatchInterval       time.Duration
 	TaskTimeout         time.Duration
 	EnableChangeRequest bool
@@ -62,11 +65,14 @@ func init() {
 	Cmd.Flags().StringVar(&opts.WebhookSecret, "webhook-secret", "", "webhook secret for GitHub/GitLab signature verification (or set WEBHOOK_SECRET env)")
 	Cmd.Flags().StringVar(&opts.AgentName, "agent", "builder", "agent name for generated FactoryTasks")
 	Cmd.Flags().StringVar(&opts.AgentCommand, "agent-command", "ai-factory-agent openai-compatible", "agent runner command")
+	Cmd.Flags().StringVar(&opts.SmokeAgentCommand, "smoke-agent-command", "cat >/tmp/ai-factory-agent-prompt.txt", "agent command for smoke mode")
 	Cmd.Flags().StringArrayVar(&opts.AgentEnv, "agent-env", nil, "environment variable to inject into agent sandbox")
 	Cmd.Flags().StringVar(&opts.SandboxTemplateRef, "sandbox-template", "go-dev", "sandbox template reference")
 	Cmd.Flags().StringVar(&opts.ContainerName, "container", "", "sandbox container name")
 	Cmd.Flags().DurationVar(&opts.WatchInterval, "watch-interval", 15*time.Second, "interval between FactoryTask list polls")
 	Cmd.Flags().DurationVar(&opts.TaskTimeout, "task-timeout", 30*time.Minute, "timeout for each SandboxClaim to become Ready")
+	Cmd.Flags().StringArrayVar(&opts.SmokeCommands, "smoke-command", nil, "command to run in smoke mode (can be repeated)")
+	Cmd.Flags().StringArrayVar(&opts.ValidationCommands, "validation-command", nil, "validation command for run mode (can be repeated)")
 	Cmd.Flags().BoolVar(&opts.EnableChangeRequest, "change-request", true, "enable PR/MR creation")
 	Cmd.Flags().BoolVar(&opts.ReportEnabled, "report", true, "enable reporting comments")
 }
@@ -220,10 +226,13 @@ func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
 		Namespace:            opts.Namespace,
 		AgentName:            opts.AgentName,
 		AgentCommand:         opts.AgentCommand,
+		SmokeAgentCommand:    opts.SmokeAgentCommand,
 		AgentEnv:             opts.AgentEnv,
 		SandboxTemplateRef:   opts.SandboxTemplateRef,
 		ContainerName:        opts.ContainerName,
 		ReportingMode:        "comment",
+		Commands:             opts.ValidationCommands,
+		SmokeCommands:        opts.SmokeCommands,
 		TriggerActions:       []string{"labeled"},
 		RequiredLabels:       []string{"ai-factory-run", "ai-factory-smoke"},
 		ChangeRequestEnabled: opts.EnableChangeRequest,

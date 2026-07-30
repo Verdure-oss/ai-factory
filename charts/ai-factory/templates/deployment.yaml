@@ -28,11 +28,31 @@ spec:
         - --namespace={{ include "ai-factory.namespace" . }}
         - --agent={{ .Values.agent.name }}
         - --agent-command={{ .Values.agent.command }}
+        - --smoke-agent-command={{ .Values.agent.smokeCommand }}
+        {{- range .Values.agent.smokeCommands }}
+        - --smoke-command={{ . }}
+        {{- end }}
+        {{- range .Values.agent.validationCommands }}
+        - --validation-command={{ . }}
+        {{- end }}
         - --sandbox-template=go-dev
         - --watch-interval={{ .Values.watchInterval }}
         - --task-timeout={{ .Values.taskTimeout }}
         - --change-request={{ .Values.changeRequestEnabled }}
         - --report={{ .Values.reportEnabled }}
+        - --agent-env=CODEX_API_KEY
+        - --agent-env=OPENAI_API_KEY
+        - --agent-env=OPENAI_BASE_URL
+        - --agent-env=OPENAI_MODEL
+        - --agent-env=OPENAI_TEMPERATURE
+        - --agent-env=OPENAI_MAX_TOKENS
+        - --agent-env=OPENAI_MAX_TOOL_ROUNDS
+        - --agent-env=OPENAI_MAX_FINAL_SCRIPT_ROUNDS
+        - --agent-env=OPENAI_MAX_REPAIR_ROUNDS
+        - --agent-env=OPENAI_TOTAL_TIMEOUT_SECONDS
+        - --agent-env=OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS
+        - --agent-env=OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS
+        - --agent-env=OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS
         ports:
         - containerPort: 8080
           name: http
@@ -53,6 +73,37 @@ spec:
             secretKeyRef:
               name: ai-factory-credentials
               key: OPENAI_API_KEY
+        - name: CODEX_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-factory-credentials
+              key: CODEX_API_KEY
+        - name: OPENAI_BASE_URL
+          value: {{ .Values.openai.baseUrl | quote }}
+        - name: OPENAI_MODEL
+          value: {{ .Values.openai.model | quote }}
+        - name: OPENAI_TEMPERATURE
+          value: {{ .Values.openai.temperature | quote }}
+        - name: OPENAI_MAX_TOKENS
+          value: {{ .Values.openai.maxTokens | quote }}
+        - name: OPENAI_MAX_TOOL_ROUNDS
+          value: {{ .Values.openai.maxToolRounds | quote }}
+        - name: OPENAI_MAX_FINAL_SCRIPT_ROUNDS
+          value: {{ .Values.openai.maxFinalScriptRounds | quote }}
+        - name: OPENAI_MAX_REPAIR_ROUNDS
+          value: {{ .Values.openai.maxRepairRounds | quote }}
+        - name: OPENAI_TOTAL_TIMEOUT_SECONDS
+          value: {{ .Values.openai.totalTimeoutSeconds | quote }}
+        - name: OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS
+          value: {{ .Values.openai.explorationRequestTimeoutSeconds | quote }}
+        - name: OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS
+          value: {{ .Values.openai.finalRequestTimeoutSeconds | quote }}
+        - name: OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS
+          value: {{ .Values.openai.repairRequestTimeoutSeconds | quote }}
+        {{- if .Values.gitProxy }}
+        - name: AI_FACTORY_GIT_PROXY
+          value: {{ .Values.gitProxy | quote }}
+        {{- end }}
         livenessProbe:
           {{- toYaml .Values.server.livenessProbe | nindent 10 }}
         readinessProbe:
