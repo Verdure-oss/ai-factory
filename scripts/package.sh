@@ -10,6 +10,41 @@ AGENT_SANDBOX_REPO="https://github.com/kubernetes-sigs/agent-sandbox.git"
 echo "=== ai-factory 打包脚本 ==="
 echo ""
 
+# 自动检测并设置代理
+setup_proxy() {
+    # 常见的代理端口
+    local proxy_ports=(7890 1080 8080 3128)
+
+    # 如果已经设置了代理，直接返回
+    if [[ -n "${http_proxy:-}" ]] || [[ -n "${HTTP_PROXY:-}" ]]; then
+        echo "✓ 检测到已配置的代理: ${http_proxy:-${HTTP_PROXY:-}}"
+        return 0
+    fi
+
+    # 尝试检测本地代理
+    for port in "${proxy_ports[@]}"; do
+        local proxy_url="http://127.0.0.1:${port}"
+        # 测试代理是否可用
+        if curl -s --connect-timeout 2 --proxy "${proxy_url}" https://www.google.com > /dev/null 2>&1; then
+            echo "✓ 检测到本地代理: ${proxy_url}"
+            export http_proxy="${proxy_url}"
+            export https_proxy="${proxy_url}"
+            export HTTP_PROXY="${proxy_url}"
+            export HTTPS_PROXY="${proxy_url}"
+            export no_proxy="localhost,127.0.0.1,::1"
+            export NO_PROXY="${no_proxy}"
+            return 0
+        fi
+    done
+
+    echo "⚠ 未检测到代理，可能影响镜像拉取速度"
+    return 0
+}
+
+# 设置代理
+setup_proxy
+echo ""
+
 # 创建输出目录
 mkdir -p "${OUTPUT_DIR}"
 
@@ -30,23 +65,79 @@ docker build \
 docker save coding-agent-sandbox:latest > "${OUTPUT_DIR}/coding-agent-sandbox.tar"
 echo "   ✓ coding-agent-sandbox.tar"
 
-# 3. 构建 agent-sandbox-controller 镜像
+# 3. 构建 agent-sandbox-controller 镜像（可选）
 echo "3. 构建 agent-sandbox-controller 镜像..."
 AGENT_SANDBOX_SRC="${AGENT_SANDBOX_SRC:-}"
 CLEANUP_SANDBOX_SRC=false
+CONTROLLER_BUILD_SUCCESS=false
+
+# 预期的镜像名称
+EXPECTED_IMAGE="ai-factory/agent-sandbox-controller:latest"
+# push-images 脚本实际生成的镜像名称（根据实际测试）
+ACTUAL_IMAGE="localhost/ai-factory/agent-sandbox-controller:dev"
+
+build_controller() {
+    local src_dir="$1"
+
+    # 检查 push-images 脚本是否存在
+    if [[ ! -f "${src_dir}/dev/tools/push-images" ]]; then
+        echo "   ⚠ push-images 脚本不存在"
+        return 1
+    fi
+
+    # 运行 push-images 脚本
+    echo "   运行 push-images 脚本..."
+    if IMAGE_PREFIX="ai-factory" IMAGE_TAG="latest" \
+        "${src_dir}/dev/tools/push-images" \
+        --image-prefix="ai-factory" \
+        --image-tag="latest" \
+        --controller-only; then
+
+        # 检查预期的镜像是否存在
+        if docker image inspect "${EXPECTED_IMAGE}" &>/dev/null; then
+            echo "   ✓ 镜像 ${EXPECTED_IMAGE} 构建成功"
+        else
+            # 检查实际生成的镜像
+            if docker image inspect "${ACTUAL_IMAGE}" &>/dev/null; then
+                echo "   ⚠ 镜像标签不匹配，重新打标签..."
+                echo "   预期: ${EXPECTED_IMAGE}"
+                echo "   实际: ${ACTUAL_IMAGE}"
+                docker tag "${ACTUAL_IMAGE}" "${EXPECTED_IMAGE}"
+                echo "   ✓ 已重新打标签为 ${EXPECTED_IMAGE}"
+            else
+                echo "   ⚠ 未找到构建的镜像"
+                return 1
+            fi
+        fi
+
+        # 保存镜像
+        docker save "${EXPECTED_IMAGE}" > "${OUTPUT_DIR}/agent-sandbox-controller.tar"
+        echo "   ✓ agent-sandbox-controller.tar"
+        return 0
+    else
+        echo "   ⚠ push-images 脚本执行失败"
+        return 1
+    fi
+}
+
 if [[ -z "${AGENT_SANDBOX_SRC}" ]]; then
     AGENT_SANDBOX_SRC=$(mktemp -d)
     CLEANUP_SANDBOX_SRC=true
     echo "   克隆 agent-sandbox 仓库..."
-    git clone --depth=1 "${AGENT_SANDBOX_REPO}" "${AGENT_SANDBOX_SRC}"
+    if git clone --depth=1 "${AGENT_SANDBOX_REPO}" "${AGENT_SANDBOX_SRC}" 2>/dev/null; then
+        if build_controller "${AGENT_SANDBOX_SRC}"; then
+            CONTROLLER_BUILD_SUCCESS=true
+        fi
+    else
+        echo "   ⚠ 无法克隆 agent-sandbox 仓库（可能需要网络代理）"
+    fi
+else
+    # 使用本地源
+    if build_controller "${AGENT_SANDBOX_SRC}"; then
+        CONTROLLER_BUILD_SUCCESS=true
+    fi
 fi
-IMAGE_PREFIX="ai-factory" IMAGE_TAG="latest" \
-    "${AGENT_SANDBOX_SRC}/dev/tools/push-images" \
-    --image-prefix="ai-factory" \
-    --image-tag="latest" \
-    --controller-only
-docker save ai-factory/agent-sandbox-controller:latest > "${OUTPUT_DIR}/agent-sandbox-controller.tar"
-echo "   ✓ agent-sandbox-controller.tar"
+
 if [[ "${CLEANUP_SANDBOX_SRC}" == "true" ]]; then
     rm -rf "${AGENT_SANDBOX_SRC}"
 fi
