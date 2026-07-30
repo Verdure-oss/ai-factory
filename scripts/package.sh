@@ -61,19 +61,34 @@ setup_proxy() {
 setup_proxy
 echo ""
 
+# 生成代理 build-arg（用于容器内部网络请求）
+PROXY_BUILD_ARGS=()
+if [[ -n "${http_proxy:-}" ]]; then
+    PROXY_BUILD_ARGS+=(--build-arg "http_proxy=${http_proxy}")
+    PROXY_BUILD_ARGS+=(--build-arg "HTTP_PROXY=${HTTP_PROXY:-${http_proxy}}")
+fi
+if [[ -n "${https_proxy:-}" ]]; then
+    PROXY_BUILD_ARGS+=(--build-arg "https_proxy=${https_proxy}")
+    PROXY_BUILD_ARGS+=(--build-arg "HTTPS_PROXY=${HTTPS_PROXY:-${https_proxy}}")
+fi
+if [[ -n "${no_proxy:-}" ]]; then
+    PROXY_BUILD_ARGS+=(--build-arg "no_proxy=${no_proxy}")
+    PROXY_BUILD_ARGS+=(--build-arg "NO_PROXY=${NO_PROXY:-${no_proxy}}")
+fi
+
 # 创建输出目录
 mkdir -p "${OUTPUT_DIR}"
 
 # 1. 构建 server 镜像
 echo "1. 构建 ai-factory-server 镜像..."
-${CONTAINER_CMD} build -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
+${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
 ${CONTAINER_CMD} save ai-factory-server:latest > "${OUTPUT_DIR}/ai-factory-server.tar"
 echo "   ✓ ai-factory-server.tar"
 
 # 2. 构建 sandbox 镜像
 echo "2. 构建 coding-agent-sandbox 镜像..."
 GO_VERSION="$(awk '/^go / {print $2; exit}' "${ROOT_DIR}/go.mod")"
-${CONTAINER_CMD} build \
+${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" \
     --build-arg GO_VERSION="${GO_VERSION}" \
     --build-arg INSTALL_CODEX_CLI=true \
     -t coding-agent-sandbox:latest \
