@@ -174,6 +174,22 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			return
 		}
 
+		// Parse event to check labels for smoke mode detection
+		event, err := taskpkg.ParseIssueWebhook(body, provider)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Determine if this is a smoke test
+		isSmoke := false
+		for _, label := range event.Labels {
+			if label == "ai-factory-smoke" {
+				isSmoke = true
+				break
+			}
+		}
+
 		// Create FactoryTask from webhook (smoke/run mode handled by FactoryTaskFromIssueWebhook)
 		task, err := taskpkg.FactoryTaskFromIssueWebhook(body, webhookOptions(provider))
 		if err != nil {
