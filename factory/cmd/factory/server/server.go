@@ -196,21 +196,15 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name)
 
-		// Update labels and post comment for GitHub
+		// Update labels for GitHub (no comment here — controller posts it to avoid duplicates)
 		if provider == taskpkg.ProviderGitHub {
 			gh := NewGitHubClient()
 			if gh.HasToken() && task.Spec.Trigger.URL != "" {
-				// Extract repo and issue number from trigger info
 				repo := task.Spec.Source.Repository
 				issueNum := 0
 				fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
 				if repo != "" && issueNum > 0 {
-					ctx := req.Context()
-					// Set task running label
-					_ = gh.SetTaskRunning(ctx, repo, issueNum)
-					// Post started comment
-					comment := fmt.Sprintf("ai-factory started processing this issue.\n\n- FactoryTask: %s/%s", namespaceForTask(task), task.Metadata.Name)
-					_ = gh.PostComment(ctx, repo, issueNum, comment)
+					_ = gh.SetTaskRunning(req.Context(), repo, issueNum)
 				}
 			}
 		}

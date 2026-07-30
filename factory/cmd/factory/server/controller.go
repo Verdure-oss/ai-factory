@@ -138,6 +138,8 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	}); err != nil {
 		return err
 	}
+	// Post "started" comment once (not in webhook, to avoid duplicates from label events)
+	postStartedComment(task)
 	if err := runKubectlWithInput(manifest, "apply", "-f", "-"); err != nil {
 		_ = patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
 			Phase:   taskpkg.PhaseFailed,
@@ -330,7 +332,25 @@ func validateChangeRequestResult(task *taskpkg.FactoryTask, resultURL string, al
 	return fmt.Errorf("no change request created: provider returned no change request URL")
 }
 
+func postStartedComment(task *taskpkg.FactoryTask) {
+	if !opts.ReportEnabled || task.Spec.Reporting.Mode != "comment" || task.Spec.Reporting.TargetURL == "" {
+		return
+	}
+	body := fmt.Sprintf("ai-factory started processing this issue.\n\n- FactoryTask: %s/%s", namespaceForTask(task), task.Metadata.Name)
+	if err := taskpkg.PostIssueComment(context.Background(), taskpkg.CommentReportOptions{
+		Provider:  reportingProvider(task),
+		TargetURL: task.Spec.Reporting.TargetURL,
+		Body:      body,
+	}); err != nil {
+		return
+	}
+}
+
 func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message string) {
+	// Always update labels regardless of comment reporting
+	updateTaskLabels(task, phase)
+
+	// Post result comment if reporting is enabled
 	if !opts.ReportEnabled || task.Spec.Reporting.Mode != "comment" || task.Spec.Reporting.TargetURL == "" {
 		return
 	}
@@ -345,24 +365,28 @@ func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message s
 		return
 	}
 	fmt.Fprintf(out, "--- REPORT: comment %s\n", task.Spec.Reporting.TargetURL)
+}
 
-	// Update GitHub labels
-	if task.Spec.Source.Provider == taskpkg.ProviderGitHub {
-		gh := NewGitHubClient()
-		if gh.HasToken() {
-			repo := task.Spec.Source.Repository
-			issueNum := 0
-			fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
-			if repo != "" && issueNum > 0 {
-				ctx := context.Background()
-				switch phase {
-				case taskpkg.PhaseSucceeded:
-					_ = gh.SetTaskDone(ctx, repo, issueNum)
-				case taskpkg.PhaseFailed:
-					_ = gh.SetTaskFailed(ctx, repo, issueNum)
-				}
-			}
-		}
+func updateTaskLabels(task *taskpkg.FactoryTask, phase string) {
+	if task.Spec.Source.Provider != taskpkg.ProviderGitHub {
+		return
+	}
+	gh := NewGitHubClient()
+	if !gh.HasToken() {
+		return
+	}
+	repo := task.Spec.Source.Repository
+	issueNum := 0
+	fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
+	if repo == "" || issueNum <= 0 {
+		return
+	}
+	ctx := context.Background()
+	switch phase {
+	case taskpkg.PhaseSucceeded:
+		_ = gh.SetTaskDone(ctx, repo, issueNum)
+	case taskpkg.PhaseFailed:
+		_ = gh.SetTaskFailed(ctx, repo, issueNum)
 	}
 }
 
