@@ -1,11 +1,27 @@
 #!/bin/bash
 # 本地打包脚本：构建镜像、导出、打包 chart
+# 支持 nerdctl（推荐，无需 Docker daemon）和 Docker
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/dist"
 AGENT_SANDBOX_REPO="https://github.com/kubernetes-sigs/agent-sandbox.git"
+
+# 检测容器构建工具（优先 nerdctl，其次 docker）
+CONTAINER_CMD=""
+if command -v nerdctl &> /dev/null && command -v buildkitd &> /dev/null; then
+    CONTAINER_CMD="nerdctl"
+    echo "✓ 使用 nerdctl + buildkit 构建镜像"
+elif command -v docker &> /dev/null; then
+    CONTAINER_CMD="docker"
+    echo "✓ 使用 docker 构建镜像"
+else
+    echo "错误: 未找到 nerdctl+buildkit 或 docker"
+    echo "安装 nerdctl: https://github.com/containerd/nerdctl/releases"
+    echo "安装 buildkit: https://github.com/moby/buildkit/releases"
+    exit 1
+fi
 
 echo "=== ai-factory 打包脚本 ==="
 echo ""
@@ -50,19 +66,19 @@ mkdir -p "${OUTPUT_DIR}"
 
 # 1. 构建 server 镜像
 echo "1. 构建 ai-factory-server 镜像..."
-docker build -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
-docker save ai-factory-server:latest > "${OUTPUT_DIR}/ai-factory-server.tar"
+${CONTAINER_CMD} build -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
+${CONTAINER_CMD} save ai-factory-server:latest > "${OUTPUT_DIR}/ai-factory-server.tar"
 echo "   ✓ ai-factory-server.tar"
 
 # 2. 构建 sandbox 镜像
 echo "2. 构建 coding-agent-sandbox 镜像..."
 GO_VERSION="$(awk '/^go / {print $2; exit}' "${ROOT_DIR}/go.mod")"
-docker build \
+${CONTAINER_CMD} build \
     --build-arg GO_VERSION="${GO_VERSION}" \
     --build-arg INSTALL_CODEX_CLI=true \
     -t coding-agent-sandbox:latest \
     "${ROOT_DIR}/components/agent-sandbox-images/coding-agent"
-docker save coding-agent-sandbox:latest > "${OUTPUT_DIR}/coding-agent-sandbox.tar"
+${CONTAINER_CMD} save coding-agent-sandbox:latest > "${OUTPUT_DIR}/coding-agent-sandbox.tar"
 echo "   ✓ coding-agent-sandbox.tar"
 
 # 3. 构建 agent-sandbox-controller 镜像（可选）
@@ -94,15 +110,15 @@ build_controller() {
         --controller-only; then
 
         # 检查预期的镜像是否存在
-        if docker image inspect "${EXPECTED_IMAGE}" &>/dev/null; then
+        if ${CONTAINER_CMD} image inspect "${EXPECTED_IMAGE}" &>/dev/null; then
             echo "   ✓ 镜像 ${EXPECTED_IMAGE} 构建成功"
         else
             # 检查实际生成的镜像
-            if docker image inspect "${ACTUAL_IMAGE}" &>/dev/null; then
+            if ${CONTAINER_CMD} image inspect "${ACTUAL_IMAGE}" &>/dev/null; then
                 echo "   ⚠ 镜像标签不匹配，重新打标签..."
                 echo "   预期: ${EXPECTED_IMAGE}"
                 echo "   实际: ${ACTUAL_IMAGE}"
-                docker tag "${ACTUAL_IMAGE}" "${EXPECTED_IMAGE}"
+                ${CONTAINER_CMD} tag "${ACTUAL_IMAGE}" "${EXPECTED_IMAGE}"
                 echo "   ✓ 已重新打标签为 ${EXPECTED_IMAGE}"
             else
                 echo "   ⚠ 未找到构建的镜像"
@@ -111,7 +127,7 @@ build_controller() {
         fi
 
         # 保存镜像
-        docker save "${EXPECTED_IMAGE}" > "${OUTPUT_DIR}/agent-sandbox-controller.tar"
+        ${CONTAINER_CMD} save "${EXPECTED_IMAGE}" > "${OUTPUT_DIR}/agent-sandbox-controller.tar"
         echo "   ✓ agent-sandbox-controller.tar"
         return 0
     else
