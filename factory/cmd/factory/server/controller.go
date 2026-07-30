@@ -110,7 +110,7 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 
 func shouldReconcile(task taskpkg.FactoryTask) bool {
 	switch task.Status.Phase {
-	case "", taskpkg.PhasePending:
+	case "", taskpkg.PhasePending, taskpkg.PhaseClaimCreated, taskpkg.PhaseSandboxReady, taskpkg.PhaseRunning:
 		return true
 	default:
 		return false
