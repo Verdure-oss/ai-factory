@@ -215,7 +215,8 @@ func (c *GitHubClient) SetTaskDone(ctx context.Context, repo string, issueNumber
 	return nil
 }
 
-// SetTaskFailed adds the failed label and removes running/done labels.
+// SetTaskFailed adds the failed label and removes running/done/run/smoke labels.
+// Removing trigger labels (run/smoke) allows users to re-trigger by re-adding them.
 func (c *GitHubClient) SetTaskFailed(ctx context.Context, repo string, issueNumber int) error {
 	if !c.HasToken() {
 		return nil
@@ -225,6 +226,8 @@ func (c *GitHubClient) SetTaskFailed(ctx context.Context, repo string, issueNumb
 	}
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRunning)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelDone)
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRun)   // Remove trigger label to allow re-run
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelSmoke) // Remove trigger label to allow re-run
 	return nil
 }
 

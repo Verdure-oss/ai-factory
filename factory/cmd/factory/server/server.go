@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -204,9 +205,40 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			return
 		}
 
-		// Check if this FactoryTask already exists and is being processed.
-		// This prevents duplicate processing when setting labels triggers new webhook events.
-		alreadyExists := factoryTaskExists(namespaceForTask(task), task.Metadata.Name)
+		// Check if this FactoryTask already exists and its current phase.
+		// This enables two behaviors:
+		// 1. Prevent duplicate processing when setting labels triggers new webhook events.
+		// 2. Allow re-running terminal (Failed/Succeeded) tasks by deleting and recreating them.
+		ns := namespaceForTask(task)
+		name := task.Metadata.Name
+		existingPhase := getFactoryTaskPhase(ns, name)
+
+		// Determine if we should set labels (only on first creation or after terminal state)
+		shouldSetLabels := false
+
+		if existingPhase != "" {
+			// Task already exists
+			if isTerminalPhase(existingPhase) {
+				// Terminal state: delete old task and create fresh instance for re-run
+				fmt.Fprintf(cmd.ErrOrStderr(), "webhook: deleting terminal FactoryTask %s/%s (phase=%s) for re-run\n",
+					ns, name, existingPhase)
+				if err := runKubectl(nil, "delete", "factorytask", name, "-n", ns, "--ignore-not-found"); err != nil {
+					http.Error(w, fmt.Sprintf("delete existing task: %v", err), http.StatusInternalServerError)
+					return
+				}
+				// Continue to apply new task below
+				shouldSetLabels = true
+			} else {
+				// Non-terminal state (Pending/Running/etc): ignore, don't interrupt running task
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"triggered":false,"reason":"task already running","task":"%s","phase":"%s"}`+"\n",
+					name, existingPhase)
+				return
+			}
+		} else {
+			// Task doesn't exist, will create new one
+			shouldSetLabels = true
+		}
 
 		data, err := taskpkg.FactoryTaskYAML(task)
 		if err != nil {
@@ -217,11 +249,12 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s (smoke=%v, exists=%v)\n", provider, task.Spec.Trigger.ID, namespaceForTask(task), task.Metadata.Name, isSmoke, alreadyExists)
+		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s (smoke=%v, existingPhase=%q)\n",
+			provider, task.Spec.Trigger.ID, ns, name, isSmoke, existingPhase)
 
-		// Only set labels on first creation (not on re-trigger)
+		// Set labels on first creation or after deleting terminal task
 		// No comment here — the controller posts it to avoid duplicates
-		if !alreadyExists && provider == taskpkg.ProviderGitHub {
+		if shouldSetLabels && provider == taskpkg.ProviderGitHub {
 			gh := NewGitHubClient()
 			if gh.HasToken() && task.Spec.Trigger.URL != "" {
 				repo := task.Spec.Source.Repository
@@ -234,7 +267,8 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","alreadyExists":%v}`+"\n", task.Metadata.Name, namespaceForTask(task), alreadyExists)
+		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","existingPhase":"%s"}`+"\n",
+			name, ns, existingPhase)
 	}
 }
 
@@ -284,4 +318,23 @@ func readBody(req *http.Request) ([]byte, error) {
 		}
 	}
 	return buf, nil
+}
+
+// getFactoryTaskPhase returns the status.phase of a FactoryTask, or "" if not found.
+func getFactoryTaskPhase(namespace, name string) string {
+	phase, err := kubectlOutput("get", "factorytask", name, "-n", namespace, "-o", "jsonpath={.status.phase}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(phase)
+}
+
+// isTerminalPhase returns true if the phase indicates a task that will no longer be processed.
+func isTerminalPhase(phase string) bool {
+	switch phase {
+	case taskpkg.PhaseFailed, taskpkg.PhaseSucceeded:
+		return true
+	default:
+		return false
+	}
 }
