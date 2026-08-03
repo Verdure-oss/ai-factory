@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -330,11 +329,11 @@ func changeRequestToken(task *FactoryTask, opts ChangeRequestOptions, defaultEnv
 		return opts.Token
 	}
 	if envName := strings.TrimSpace(task.Spec.ChangeRequest.AuthTokenEnv); envName != "" {
-		if token := os.Getenv(envName); token != "" {
+		if token := ReadConfig(envName); token != "" {
 			return token
 		}
 	}
-	return os.Getenv(defaultEnv)
+	return ReadConfig(defaultEnv)
 }
 
 func changeRequestTokenRequiredMessage(task *FactoryTask, defaultEnv, target string) string {

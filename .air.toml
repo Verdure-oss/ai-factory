@@ -1,0 +1,42 @@
+# Air configuration for ai-factory development
+# Docs: https://github.com/air-verse/air
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # Just build the binary, don't run it (we run it in the run section)
+  cmd = "go build -o ./tmp/ai-factory-server ./factory/cmd/factory"
+  bin = "./tmp/ai-factory-server server --addr=:32519 --namespace=ai-factory --agent=builder --agent-command='ai-factory-agent openai-compatible' --smoke-agent-command='cat >/tmp/ai-factory-agent-prompt.txt' --smoke-command='mkdir -p .ai-factory/smoke && echo smoke-$(date +%s) > .ai-factory/smoke/placeholder.txt && test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent' --validation-command='go test ./...' --sandbox-template=go-dev --watch-interval=15s --task-timeout=30m --change-request=true --report=true --agent-env=CODEX_API_KEY --agent-env=OPENAI_API_KEY --agent-env=OPENAI_BASE_URL --agent-env=OPENAI_MODEL --agent-env=OPENAI_TEMPERATURE --agent-env=OPENAI_MAX_TOKENS --agent-env=OPENAI_MAX_TOOL_ROUNDS --agent-env=OPENAI_MAX_FINAL_SCRIPT_ROUNDS --agent-env=OPENAI_MAX_REPAIR_ROUNDS --agent-env=OPENAI_TOTAL_TIMEOUT_SECONDS --agent-env=OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS --agent-env=OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS --agent-env=OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS"
+
+  # Watch these files
+  include_ext = ["go", "tpl", "tmpl", "html"]
+
+  # Exclude these directories/files
+  exclude_dir = ["dist", "vendor", "tmp", ".git", "node_modules"]
+  exclude_file = []
+  exclude_regex = ["_test.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = ""
+  include_dir = []
+  kill_delay = "0s"
+  log = "build-errors.log"
+  send_interrupt = false
+  stop_on_error = true
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = false
+
+[screen]
+  clear_on_rebuild = false

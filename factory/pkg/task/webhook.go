@@ -72,6 +72,10 @@ type IssueWebhookEvent struct {
 	DefaultBranch  string
 	CloneURL       string
 	Labels         []string
+	// TriggerLabel is the specific label that triggered this webhook event.
+	// For GitHub's issues.labeled event, this is the label that was just added.
+	// Empty if the event has no single triggering label (e.g., issue opened/edited).
+	TriggerLabel string
 }
 
 // IgnoredIssueWebhookError reports a valid issue webhook that did not match trigger rules.
@@ -196,8 +200,18 @@ func ShouldTriggerIssue(event *IssueWebhookEvent, opts IssueWebhookOptions) (boo
 	if len(opts.Repositories) > 0 && !matchesAny(event.Repository, opts.Repositories) {
 		return false, fmt.Sprintf("ignored repository %q", event.Repository)
 	}
-	if len(opts.RequiredLabels) > 0 && !hasAnyLabel(event.Labels, opts.RequiredLabels) {
-		return false, fmt.Sprintf("ignored issue without required label %q", strings.Join(opts.RequiredLabels, ","))
+	if len(opts.RequiredLabels) > 0 {
+		// When a specific trigger label is available (e.g., GitHub's issues.labeled event
+		// carries the label that was just added), only match against that label.
+		// This prevents re-triggering when the system adds its own labels (e.g., ai-factory-running).
+		// Fall back to checking all labels when no trigger label is present.
+		candidateLabels := event.Labels
+		if event.TriggerLabel != "" {
+			candidateLabels = []string{event.TriggerLabel}
+		}
+		if !hasAnyLabel(candidateLabels, opts.RequiredLabels) {
+			return false, fmt.Sprintf("ignored issue without required label %q", strings.Join(opts.RequiredLabels, ","))
+		}
 	}
 	if len(opts.RequireAllOf) > 0 && !hasAllLabels(event.Labels, opts.RequireAllOf) {
 		return false, fmt.Sprintf("issue missing required label %q", strings.Join(opts.RequireAllOf, ","))
@@ -322,6 +336,7 @@ func parseGitHubIssueWebhook(payload []byte) (*IssueWebhookEvent, error) {
 		DefaultBranch:  raw.Repository.DefaultBranch,
 		CloneURL:       raw.Repository.CloneURL,
 		Labels:         githubLabels(raw),
+		TriggerLabel:   strings.TrimSpace(raw.Label.Name),
 	}, nil
 }
 

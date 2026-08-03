@@ -103,6 +103,11 @@ github:
   # GitHub token (set via --set or in secret)
   token: ""
 
+# GitLab configuration
+gitlab:
+  # GitLab token (set via --set or in secret)
+  token: ""
+
 # OpenAI configuration
 openai:
   # OpenAI API key (set via --set or in secret)

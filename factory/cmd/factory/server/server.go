@@ -79,12 +79,8 @@ func init() {
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
-	// Resolve webhook secret from flag or env
-	secret := opts.WebhookSecret
-	if secret == "" {
-		secret = os.Getenv("WEBHOOK_SECRET")
-	}
-	opts.WebhookSecret = secret
+	// Webhook secret: CLI flag is stored in opts.WebhookSecret.
+	// If not set via flag, verifyWebhook() will read from file/env at request time.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -246,6 +242,15 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			return
 		}
 		if err := runKubectlWithInput(data, "apply", "-f", "-"); err != nil {
+			if isAlreadyExistsError(err) {
+				// Concurrent webhook created the resource first — treat as success.
+				// The first request will handle label setting and task execution.
+				fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue %s -> FactoryTask %s/%s already created (concurrent webhook)\n",
+					provider, task.Spec.Trigger.ID, ns, name)
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","concurrent":true}`+"\n", name, ns)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -293,11 +298,16 @@ func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
 }
 
 func verifyWebhook(provider string, body []byte, req *http.Request) error {
+	// CLI flag takes priority; otherwise read fresh each time for hot-reload support
+	secret := opts.WebhookSecret
+	if secret == "" {
+		secret = taskpkg.ReadConfig("WEBHOOK_SECRET")
+	}
 	switch provider {
 	case taskpkg.ProviderGitHub:
-		return taskpkg.VerifyGitHubWebhookSignature(opts.WebhookSecret, body, req.Header.Get("X-Hub-Signature-256"))
+		return taskpkg.VerifyGitHubWebhookSignature(secret, body, req.Header.Get("X-Hub-Signature-256"))
 	case taskpkg.ProviderGitLab:
-		return taskpkg.VerifyGitLabWebhookToken(opts.WebhookSecret, req.Header.Get("X-Gitlab-Token"))
+		return taskpkg.VerifyGitLabWebhookToken(secret, req.Header.Get("X-Gitlab-Token"))
 	default:
 		return fmt.Errorf("unsupported webhook provider %q", provider)
 	}
@@ -337,4 +347,10 @@ func isTerminalPhase(phase string) bool {
 	default:
 		return false
 	}
+}
+
+// isAlreadyExistsError returns true if the error is a Kubernetes AlreadyExists error.
+// This happens when concurrent webhook requests race to create the same resource.
+func isAlreadyExistsError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "AlreadyExists")
 }

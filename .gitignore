@@ -1,18 +1,39 @@
-# Build output
-dist/
-
-# Local cluster credentials.
-kubeconfig
-
-# Local editor and OS files.
-.DS_Store
-*.bak
-*.swp
-
-# Python build artifacts.
+﻿# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE files
+.vscode/
+.idea/
+
+# Local env files
+.env
+.env.*
+
+# Build artifacts
+/dist/
+/build/
+/bin/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.coverage
+.pytest_cache/
+htmlcov/
 
 # Claude Code
 .claude/
 factory.exe
+
+# Config files with real credentials (never commit)
+scripts/ai-factory.env

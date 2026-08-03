@@ -115,6 +115,18 @@ echo ""
 echo "3. 配置凭证..."
 echo ""
 
+# 优先从 ai-factory.env 加载
+ENV_FILE="${SCRIPT_DIR}/ai-factory.env"
+if [ -f "${ENV_FILE}" ]; then
+    echo "   从 ${ENV_FILE} 加载配置..."
+    set -a
+    source "${ENV_FILE}"
+    set +a
+    echo "   ✓ 已加载"
+else
+    echo "   配置文件不存在，将交互式收集"
+fi
+
 if [ -z "${GITHUB_TOKEN:-}" ]; then
     read -p "GitHub Token: " GITHUB_TOKEN
 fi
@@ -125,6 +137,19 @@ fi
 
 if [ -z "${OPENAI_API_KEY:-}" ]; then
     read -p "OpenAI API Key: " OPENAI_API_KEY
+fi
+
+# 保存到 env 文件（首次部署时创建，方便后续热更新）
+if [ ! -f "${ENV_FILE}" ]; then
+    cat > "${ENV_FILE}" <<EOF
+# ai-factory 配置文件 — 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
+# 修改后运行 ./update-config.sh 即可热更新（无需重启 Pod）
+
+GITHUB_TOKEN=${GITHUB_TOKEN}
+WEBHOOK_SECRET=${WEBHOOK_SECRET}
+OPENAI_API_KEY=${OPENAI_API_KEY}
+EOF
+    echo "   ✓ 配置已保存到 ${ENV_FILE}"
 fi
 
 # 4. 安装 Helm chart
@@ -191,3 +216,7 @@ echo "     kubectl get pods -n ${NAMESPACE}"
 echo "     kubectl get factorytasks -n ${NAMESPACE}"
 echo "     kubectl get sandboxwarmpool -n ${NAMESPACE}"
 echo "     kubectl logs deployment/ai-factory-server -n ${NAMESPACE} --tail=50"
+echo ""
+echo "  6. 热更新配置（无需重启 Pod）:"
+echo "     vim ai-factory.env     # 修改配置"
+echo "     ./update-config.sh     # 同步到 K8s，~30s 后自动生效"

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-factory-config
+  namespace: {{ include "ai-factory.namespace" . }}
+  labels:
+    {{- include "ai-factory.labels" . | nindent 4 }}
+data:
+  OPENAI_BASE_URL: {{ .Values.openai.baseUrl | quote }}
+  OPENAI_MODEL: {{ .Values.openai.model | quote }}
+  OPENAI_TEMPERATURE: {{ .Values.openai.temperature | quote }}
+  OPENAI_MAX_TOKENS: {{ .Values.openai.maxTokens | quote }}
+  OPENAI_MAX_TOOL_ROUNDS: {{ .Values.openai.maxToolRounds | quote }}
+  OPENAI_MAX_FINAL_SCRIPT_ROUNDS: {{ .Values.openai.maxFinalScriptRounds | quote }}
+  OPENAI_MAX_REPAIR_ROUNDS: {{ .Values.openai.maxRepairRounds | quote }}
+  OPENAI_TOTAL_TIMEOUT_SECONDS: {{ .Values.openai.totalTimeoutSeconds | quote }}
+  OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.explorationRequestTimeoutSeconds | quote }}
+  OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.finalRequestTimeoutSeconds | quote }}
+  OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.repairRequestTimeoutSeconds | quote }}
+  {{- if .Values.gitProxy }}
+  AI_FACTORY_GIT_PROXY: {{ .Values.gitProxy | quote }}
+  {{- end }}

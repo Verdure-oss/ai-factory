@@ -189,6 +189,8 @@ echo "5. 复制部署脚本..."
 cp "${ROOT_DIR}/scripts/deploy-remote.sh" "${OUTPUT_DIR}/"
 chmod +x "${OUTPUT_DIR}/deploy-remote.sh"
 echo "   ✓ deploy-remote.sh"
+cp "${ROOT_DIR}/scripts/ai-factory.env.example" "${OUTPUT_DIR}/ai-factory.env"
+echo "   ✓ ai-factory.env（配置模板，部署前填写真实值）"
 
 # 6. 复制 CRD 安装脚本
 echo "6. 复制 CRD 安装脚本..."

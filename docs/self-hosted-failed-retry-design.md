@@ -1,13 +1,121 @@
 # 自托管服务问题与设计文档
 
-> 状态：设计讨论中
+> 状态：问题一、二、三、六已解决，其他问题设计中
 > 日期：2026-07-30
+> 最后更新：2026-08-03
+
+## 问题一实现状态 ✅ 已完成
+
+**实现日期**：2026-08-03
+
+**实现内容**：
+1. ✅ Webhook 层终态检测和删除逻辑（`server/server.go`）
+2. ✅ 失败时移除触发标签（`server/github.go` - `SetTaskFailed()`）
+3. ✅ 辅助函数 `getFactoryTaskPhase()` 和 `isTerminalPhase()`
+4. ✅ 修复 `kubectl wait` 与 CRD 兼容性问题，改用轮询机制（`server/controller.go`）
+
+**已知问题修复**：
+- 发现 `kubectl wait --for=condition=Ready` 对 SandboxClaim CRD 不工作
+- 解决方案：实现 `waitForSandboxClaimReady()` 轮询函数替代 `kubectl wait`
+
+**验证结果**：
+- ✅ 失败的 FactoryTask 可以被正确删除和重建
+- ✅ 重试流程正常工作：删除标签 → 重新添加标签 → 任务重新执行
+- ✅ SandboxClaim 等待逻辑正常工作
+
+---
+
+## 问题二实现状态 ✅ 已完成
+
+**实现日期**：2026-08-03
+
+**实现内容**：
+1. ✅ 新增 `labelWaiting` 常量和 `SetTaskWaiting()` 方法（`server/github.go`）
+2. ✅ `SetTaskRunning()` 中增加清理 `labelWaiting`（避免 waiting→running 切换时残留）
+3. ✅ `SetTaskDone()` / `SetTaskFailed()` 中增加清理 `labelWaiting`
+4. ✅ 新增 `updateIntermediateLabel()` 辅助函数（`server/controller.go`）
+5. ✅ `executeTask()` 中 `ClaimCreated` 阶段调用 `SetTaskWaiting()`
+6. ✅ `executeTask()` 中 `SandboxReady` 阶段调用 `SetTaskRunning()`
+7. ✅ 单元测试覆盖（`server/github_test.go`）
+
+**标签流转**：
+```
+Webhook 创建 → ai-factory-running
+控制器 ClaimCreated → ai-factory-waiting（等待 warm pool pod）
+SandboxClaim Ready → ai-factory-running（开始执行）
+完成 → ai-factory-done / ai-factory-failed
+```
+
+**验证结果**：
+- ✅ 标签切换正常工作，GitHub issue 时间线可见 waiting→running 转换
+- ✅ 所有标签方法互相清理，不存在残留
+- ✅ 单元测试 `TestFullLabelTransitionFlow` 验证完整生命周期
+
+---
+
+## 问题三实现状态 ✅ 已完成
+
+**实现日期**：2026-08-03
+
+**实现内容**：
+1. ✅ 新增 `isAlreadyExistsError()` 辅助函数（`server/server.go`）
+2. ✅ Webhook handler 中 `kubectl apply` 错误处理：捕获 AlreadyExists 视为成功
+3. ✅ 并发请求返回 200 + JSON（`concurrent: true`），不重复设置标签
+4. ✅ 单元测试覆盖（`server/github_test.go`）
+
+**行为**：
+```
+并发 webhook 到达：
+  请求 A → kubectl apply 成功 → SetTaskRunning → 返回 200
+  请求 B → kubectl apply AlreadyExists → 日志记录 → 返回 200 (concurrent: true)
+```
+
+GitHub 不再收到 500 错误，不会触发无效重试。
+
+### 附加修复：Webhook 连锁触发导致评论重复 ✅
+
+**问题发现日期**：2026-08-03
+
+**问题描述**：
+在实际运行中发现 issue 评论被发送两次，标签被移除两次。
+
+**根因分析**：
+当 `SetTaskDone()` 执行时，操作顺序为：
+1. `AddLabel("ai-factory-done")` → GitHub 发送 `issues.labeled` webhook
+2. `RemoveLabel("ai-factory-running")` → ...
+3. `RemoveLabel("ai-factory-run")` → ...
+
+在第 1 步时，`issues.labeled` webhook 被触发。此时 issue 上还残留着 `ai-factory-run` 标签（第 3 步还没执行）。旧代码的 `ShouldTriggerIssue` 检查 `event.Labels`（包含 issue 上所有标签），发现 `ai-factory-run` 存在，于是认为这是一个有效的触发请求。
+
+Webhook handler 发现 FactoryTask 处于终态（Succeeded），删除旧任务并创建新任务，导致第二次执行。
+
+**解决方案**：
+给 `IssueWebhookEvent` 新增 `TriggerLabel` 字段，记录触发 webhook 的那个具体标签（来自 GitHub 的 `label.name` 字段）。`RequiredLabels` 检查改为只检查 `TriggerLabel`，而非所有标签。
+
+**改动**：
+1. ✅ `IssueWebhookEvent` 新增 `TriggerLabel` 字段（`pkg/task/webhook.go`）
+2. ✅ GitHub 解析器从 `raw.Label.Name` 填充 `TriggerLabel`
+3. ✅ `ShouldTriggerIssue` 中 `RequiredLabels` 检查改为优先使用 `TriggerLabel`
+4. ✅ 单元测试覆盖（`pkg/task/webhook_test.go`）
+
+**修复后行为**：
+```
+SetTaskDone() 添加 ai-factory-done → issues.labeled (TriggerLabel=ai-factory-done)
+  → TriggerLabel "ai-factory-done" 不在 RequiredLabels ["ai-factory-run", "ai-factory-smoke"] 中
+  → Webhook 被忽略 ✅
+
+用户添加 ai-factory-run → issues.labeled (TriggerLabel=ai-factory-run)
+  → TriggerLabel "ai-factory-run" 在 RequiredLabels 中
+  → Webhook 被处理 ✅
+```
+
+---
 
 ## 待办列表
 
-- [ ] 实现问题一：Failed Issue 重试机制（高优先级）
-- [ ] 实现问题二：并发任务状态可见性 — `ai-factory-waiting` 标签（高优先级）
-- [ ] 实现问题三：并发 Webhook 竞态处理（高优先级）
+- [x] 实现问题一：Failed Issue 重试机制（高优先级）✅ 已完成
+- [x] 实现问题二：并发任务状态可见性 — `ai-factory-waiting` 标签（高优先级）✅ 已完成
+- [x] 实现问题三：并发 Webhook 竞态处理（高优先级）✅ 已完成
 - [ ] 讨论问题四：服务器重启后任务恢复（低优先级）
 - [ ] 讨论问题五：Issue 关闭时任务处理（低优先级）
 - [ ] 编写执行文档：打包与部署流程
@@ -18,7 +126,7 @@
   - [ ] 验证部署是否成功（健康检查、warm pool 状态、webhook 测试）
   - [ ] GitHub 仓库 Webhook 配置指引
   - [ ] 常见问题排查
-- [ ] 实现配置热更新：Secret 文件挂载 + 补齐 model/url/base_url 交互式配置
+- [x] 实现配置热更新：Secret 文件挂载 + 补齐 model/url/base_url 交互式配置 ✅ 已完成
 
 ## 问题描述
 
@@ -532,6 +640,59 @@ kubectl create secret generic ai-factory-credentials \
     --from-literal=WEBHOOK_SECRET=... \
     -n ai-factory --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+### 问题六实现状态 ✅ 已完成
+
+**实现日期**：2026-08-03
+
+**实现内容**：
+1. ✅ 新增 `ReadConfig()` 工具函数（`factory/pkg/task/config.go`）
+2. ✅ 所有 `os.Getenv` 调用改为 `ReadConfig`（server 和 pkg/task 共 7 个文件）
+3. ✅ Helm chart：Secret volume mount + ConfigMap volume mount（替代 env var）
+4. ✅ `deploy-remote.sh` 补齐 OPENAI_BASE_URL / OPENAI_MODEL 交互配置
+5. ✅ Secret 增加 GITLAB_TOKEN 字段
+
+**配置读取优先级**：
+```
+1. /etc/ai-factory/secret/<name>   ← K8s Secret volume（自动同步 ~30s）
+2. /etc/ai-factory/config/<name>   ← K8s ConfigMap volume（自动同步 ~30s）
+3. os.Getenv(name)                 ← 本地 dev.sh 兼容回退
+```
+
+**文件与配置项映射**：
+
+| 文件 | 说明 |
+|------|------|
+| `scripts/ai-factory.env` | 本地配置文件，编辑后运行 `scripts/update-config.sh` 同步到集群 |
+| `scripts/update-config.sh` | 配置同步脚本，读取 .env 文件更新 K8s Secret + ConfigMap |
+
+| Pod 内挂载路径 | K8s 资源 | 配置项 |
+|--------------|---------|--------|
+| `/etc/ai-factory/secret/` | Secret/ai-factory-credentials | GITHUB_TOKEN, WEBHOOK_SECRET, OPENAI_API_KEY, CODEX_API_KEY, GITLAB_TOKEN |
+| `/etc/ai-factory/config/` | ConfigMap/ai-factory-config | OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_TEMPERATURE, OPENAI_MAX_TOKENS, 其他超时/轮次配置, AI_FACTORY_GIT_PROXY |
+
+**热更新操作**：
+
+编辑 `scripts/ai-factory.env` 文件，然后运行：
+
+```bash
+./scripts/update-config.sh
+```
+
+脚本会自动读取 .env 文件，分别更新 K8s Secret 和 ConfigMap。~30s 后新配置自动生效，无需重启 Pod。
+
+**验证方式**（无需进入容器）：
+
+触发一个新 issue，然后检查最新 SandboxClaim 的环境变量：
+
+```bash
+kubectl get sandboxclaims -n ai-factory \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1].spec.template.spec.containers[0].env}' | \
+    python3 -m json.tool | grep -A1 OPENAI_MODEL
+```
+
+如果值已更新，说明热更新生效。
 
 ---
 

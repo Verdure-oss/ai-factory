@@ -211,6 +211,98 @@ func TestFactoryTaskFromIssueWebhookIgnoredForUnsupportedAction(t *testing.T) {
 	}
 }
 
+// TestFactoryTaskFromGitHubIssueWebhookIgnoresSystemLabelTrigger verifies that
+// when the system adds its own label (e.g., ai-factory-running), the webhook
+// is ignored even though the issue also has the trigger label (ai-factory-run).
+// This prevents duplicate comment/label operations caused by webhook chaining.
+func TestFactoryTaskFromGitHubIssueWebhookIgnoresSystemLabelTrigger(t *testing.T) {
+	// This payload simulates what GitHub sends when the system adds ai-factory-running:
+	// - action: "labeled"
+	// - label.name: "ai-factory-running" (the triggering label)
+	// - issue.labels: includes BOTH ai-factory-run and ai-factory-running (all current labels)
+	payload := `{
+  "action": "labeled",
+  "label": {"name": "ai-factory-running"},
+  "issue": {
+    "number": 42,
+    "title": "Test issue",
+    "body": "Test body",
+    "html_url": "https://github.com/test/repo/issues/42",
+    "user": {"login": "testuser"},
+    "labels": [
+      {"name": "ai-factory"},
+      {"name": "ai-factory-run"},
+      {"name": "ai-factory-running"}
+    ]
+  },
+  "repository": {
+    "full_name": "test/repo",
+    "html_url": "https://github.com/test/repo",
+    "clone_url": "https://github.com/test/repo.git",
+    "default_branch": "main"
+  },
+  "sender": {"login": "testuser"}
+}`
+	_, err := FactoryTaskFromIssueWebhook([]byte(payload), IssueWebhookOptions{
+		Provider:           ProviderGitHub,
+		AgentName:          "builder",
+		SandboxTemplateRef: "go-dev",
+		TriggerActions:     []string{"labeled"},
+		RequiredLabels:     []string{"ai-factory-run", "ai-factory-smoke"},
+		RequireAllOf:       []string{"ai-factory"},
+	})
+	if err == nil {
+		t.Fatal("FactoryTaskFromIssueWebhook() error = nil, want ignored error for system label trigger")
+	}
+	if _, ok := err.(*IgnoredIssueWebhookError); !ok {
+		t.Fatalf("error type = %T, want *IgnoredIssueWebhookError", err)
+	}
+	if !strings.Contains(err.Error(), "required label") {
+		t.Fatalf("error = %v, want required label reason", err)
+	}
+}
+
+// TestFactoryTaskFromGitHubIssueWebhookAcceptsUserLabelTrigger verifies that
+// when the user adds a trigger label (e.g., ai-factory-run), the webhook is processed.
+func TestFactoryTaskFromGitHubIssueWebhookAcceptsUserLabelTrigger(t *testing.T) {
+	payload := `{
+  "action": "labeled",
+  "label": {"name": "ai-factory-run"},
+  "issue": {
+    "number": 42,
+    "title": "Test issue",
+    "body": "Test body",
+    "html_url": "https://github.com/test/repo/issues/42",
+    "user": {"login": "testuser"},
+    "labels": [
+      {"name": "ai-factory"},
+      {"name": "ai-factory-run"}
+    ]
+  },
+  "repository": {
+    "full_name": "test/repo",
+    "html_url": "https://github.com/test/repo",
+    "clone_url": "https://github.com/test/repo.git",
+    "default_branch": "main"
+  },
+  "sender": {"login": "testuser"}
+}`
+	task, err := FactoryTaskFromIssueWebhook([]byte(payload), IssueWebhookOptions{
+		Provider:           ProviderGitHub,
+		AgentName:          "builder",
+		SandboxTemplateRef: "go-dev",
+		TriggerActions:     []string{"labeled"},
+		RequiredLabels:     []string{"ai-factory-run", "ai-factory-smoke"},
+		RequireAllOf:       []string{"ai-factory"},
+	})
+	if err != nil {
+		t.Fatalf("FactoryTaskFromIssueWebhook() error = %v, want nil", err)
+	}
+	if task.Spec.Trigger.ID != "42" {
+		t.Fatalf("Trigger.ID = %q, want 42", task.Spec.Trigger.ID)
+	}
+}
+
 func TestFactoryTaskFromGitLabIssueWebhook(t *testing.T) {
 	task, err := FactoryTaskFromIssueWebhook([]byte(gitlabIssuePayload), IssueWebhookOptions{
 		Provider:           ProviderGitLab,
