@@ -20,9 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
+
+	taskpkg "github.com/ai-on-gke/ai-factory/factory/pkg/task"
 )
 
 const (
@@ -30,6 +31,7 @@ const (
 
 	// Label constants
 	labelRunning = "ai-factory-running"
+	labelWaiting = "ai-factory-waiting"
 	labelDone    = "ai-factory-done"
 	labelFailed  = "ai-factory-failed"
 	labelRun     = "ai-factory-run"
@@ -44,12 +46,14 @@ type GitHubClient struct {
 }
 
 // NewGitHubClient creates a new GitHub API client.
+// Credentials are read via taskpkg.ReadConfig to support hot-reload from
+// mounted Secret files (with env var fallback for local development).
 func NewGitHubClient() *GitHubClient {
-	token := os.Getenv("GITHUB_TOKEN")
+	token := taskpkg.ReadConfig("GITHUB_TOKEN")
 	if token == "" {
-		token = os.Getenv("AI_FACTORY_GITHUB_TOKEN")
+		token = taskpkg.ReadConfig("AI_FACTORY_GITHUB_TOKEN")
 	}
-	apiBase := os.Getenv("GITHUB_API_BASE")
+	apiBase := taskpkg.ReadConfig("GITHUB_API_BASE")
 	if apiBase == "" {
 		apiBase = defaultGitHubAPIBase
 	}
@@ -181,7 +185,7 @@ func (c *GitHubClient) PostComment(ctx context.Context, repo string, issueNumber
 	return nil
 }
 
-// SetTaskRunning adds the running label and removes done/failed labels.
+// SetTaskRunning adds the running label and removes done/failed/waiting labels.
 func (c *GitHubClient) SetTaskRunning(ctx context.Context, repo string, issueNumber int) error {
 	if !c.HasToken() {
 		return nil
@@ -191,16 +195,32 @@ func (c *GitHubClient) SetTaskRunning(ctx context.Context, repo string, issueNum
 	_ = c.EnsureLabel(ctx, repo, labelDone, "0E8A16", "ai-factory completed this issue")
 	_ = c.EnsureLabel(ctx, repo, labelFailed, "B60205", "ai-factory failed this issue")
 
-	// Add running, remove done/failed
+	// Add running, remove done/failed/waiting
 	if err := c.AddLabel(ctx, repo, issueNumber, labelRunning); err != nil {
 		return err
 	}
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelDone)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelFailed)
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelWaiting)
 	return nil
 }
 
-// SetTaskDone adds the done label and removes running/failed/run labels.
+// SetTaskWaiting adds the waiting label and removes the running label.
+// Used when a task is queued waiting for a sandbox pod from the warm pool.
+func (c *GitHubClient) SetTaskWaiting(ctx context.Context, repo string, issueNumber int) error {
+	if !c.HasToken() {
+		return nil
+	}
+	_ = c.EnsureLabel(ctx, repo, labelWaiting, "F9C809", "ai-factory is waiting for a sandbox pod")
+
+	if err := c.AddLabel(ctx, repo, issueNumber, labelWaiting); err != nil {
+		return err
+	}
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRunning)
+	return nil
+}
+
+// SetTaskDone adds the done label and removes running/waiting/failed/run labels.
 func (c *GitHubClient) SetTaskDone(ctx context.Context, repo string, issueNumber int) error {
 	if !c.HasToken() {
 		return nil
@@ -209,13 +229,14 @@ func (c *GitHubClient) SetTaskDone(ctx context.Context, repo string, issueNumber
 		return err
 	}
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRunning)
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelWaiting)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelFailed)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRun)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelSmoke)
 	return nil
 }
 
-// SetTaskFailed adds the failed label and removes running/done/run/smoke labels.
+// SetTaskFailed adds the failed label and removes running/waiting/done/run/smoke labels.
 // Removing trigger labels (run/smoke) allows users to re-trigger by re-adding them.
 func (c *GitHubClient) SetTaskFailed(ctx context.Context, repo string, issueNumber int) error {
 	if !c.HasToken() {
@@ -225,6 +246,7 @@ func (c *GitHubClient) SetTaskFailed(ctx context.Context, repo string, issueNumb
 		return err
 	}
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRunning)
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelWaiting)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelDone)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRun)   // Remove trigger label to allow re-run
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelSmoke) // Remove trigger label to allow re-run

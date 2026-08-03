@@ -16,7 +16,6 @@ package task
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
@@ -85,17 +84,17 @@ func Reconcile(task *FactoryTask) (*ReconcileOutput, error) {
 		},
 	}
 	if task.Spec.ChangeRequest.Enabled && plan.GitAuthTokenEnv != "" {
-		if token := os.Getenv(plan.GitAuthTokenEnv); token != "" {
+		if token := ReadConfig(plan.GitAuthTokenEnv); token != "" {
 			appendSandboxEnv(claim.Spec, plan.ContainerName, plan.GitAuthTokenEnv, token)
 		}
 	}
 	for _, envName := range task.Spec.Agent.Env {
-		if value := os.Getenv(envName); value != "" {
+		if value := ReadConfig(envName); value != "" {
 			appendSandboxEnv(claim.Spec, plan.ContainerName, envName, value)
 		}
 	}
 	// Inject git proxy if configured (used by plan step "configure git proxy")
-	if proxy := os.Getenv("AI_FACTORY_GIT_PROXY"); proxy != "" {
+	if proxy := ReadConfig("AI_FACTORY_GIT_PROXY"); proxy != "" {
 		appendSandboxEnv(claim.Spec, plan.ContainerName, "AI_FACTORY_GIT_PROXY", proxy)
 	}
 

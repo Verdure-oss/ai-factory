@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -139,7 +138,7 @@ func buildGitHubCommentRequest(opts CommentReportOptions, body string) (*Comment
 	}
 	token := opts.Token
 	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
+		token = ReadConfig("GITHUB_TOKEN")
 	}
 	if token == "" {
 		return nil, errors.New("GITHUB_TOKEN is required to comment on GitHub issues")
@@ -172,7 +171,7 @@ func buildGitLabCommentRequest(opts CommentReportOptions, body string) (*Comment
 	}
 	token := opts.Token
 	if token == "" {
-		token = os.Getenv("GITLAB_TOKEN")
+		token = ReadConfig("GITLAB_TOKEN")
 	}
 	if token == "" {
 		return nil, errors.New("GITLAB_TOKEN is required to comment on GitLab issues")

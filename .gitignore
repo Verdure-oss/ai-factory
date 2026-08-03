@@ -15,3 +15,6 @@ __pycache__/
 
 # Claude Code
 .claude/
+
+# Config files with real credentials (never commit)
+scripts/ai-factory.env

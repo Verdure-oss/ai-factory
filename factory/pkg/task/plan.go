@@ -254,6 +254,7 @@ Work in a plan-first, small-step style:
 - Python includes the PyYAML module (import yaml), but there is no yaml or yq command.
 - Do not run python3 -m py_compile or compileall because they leave __pycache__ or .pyc build artifacts. Use compile(source, filename, "exec") or repository tests instead.
 - Do not assume commands outside this list are installed, and do not install packages during a repair. Rewrite the step with available tools instead.
+- **DO NOT run git commit, git push, git add, or any git commands that modify repository state.** You can use git status, git diff, git log, git branch for reading, but NEVER commit or push. The system will handle commit and push after validation passes.
 
 ## FactoryTask instructions
 

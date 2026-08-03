@@ -157,7 +157,10 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	}); err != nil {
 		return err
 	}
-	if err := runKubectl(nil, "wait", "sandboxclaim", claim, "-n", namespace, "--for=condition=Ready", "--timeout="+timeout.String()); err != nil {
+	// Update GitHub label to "waiting" while queued for a warm pool pod
+	updateIntermediateLabel(task, taskpkg.PhaseClaimCreated)
+	// Use polling instead of kubectl wait (kubectl wait has issues with some CRDs)
+	if err := waitForSandboxClaimReady(namespace, claim, timeout); err != nil {
 		_ = patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
 			Phase:            taskpkg.PhaseFailed,
 			Reason:           "SandboxClaimReadyTimeout",
@@ -185,6 +188,8 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	}); err != nil {
 		return err
 	}
+	// Update GitHub label back to "running" now that sandbox pod is ready
+	updateIntermediateLabel(task, taskpkg.PhaseSandboxReady)
 	if err := patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
 		Phase:            taskpkg.PhaseRunning,
 		Reason:           "PlanStarted",
@@ -387,6 +392,31 @@ func updateTaskLabels(task *taskpkg.FactoryTask, phase string) {
 		_ = gh.SetTaskDone(ctx, repo, issueNum)
 	case taskpkg.PhaseFailed:
 		_ = gh.SetTaskFailed(ctx, repo, issueNum)
+	}
+}
+
+// updateIntermediateLabel sets the appropriate GitHub label during task execution.
+// Called when transitioning between ClaimCreated (waiting) and SandboxReady (running).
+func updateIntermediateLabel(task *taskpkg.FactoryTask, phase string) {
+	if task.Spec.Source.Provider != taskpkg.ProviderGitHub {
+		return
+	}
+	gh := NewGitHubClient()
+	if !gh.HasToken() {
+		return
+	}
+	repo := task.Spec.Source.Repository
+	issueNum := 0
+	fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
+	if repo == "" || issueNum <= 0 {
+		return
+	}
+	ctx := context.Background()
+	switch phase {
+	case taskpkg.PhaseClaimCreated:
+		_ = gh.SetTaskWaiting(ctx, repo, issueNum)
+	case taskpkg.PhaseSandboxReady:
+		_ = gh.SetTaskRunning(ctx, repo, issueNum)
 	}
 }
 
@@ -632,9 +662,26 @@ func redactSensitive(value string) string {
 		"AI_FACTORY_GITHUB_TOKEN",
 		"WEBHOOK_SECRET",
 	} {
-		if secret := os.Getenv(name); secret != "" {
+		if secret := taskpkg.ReadConfig(name); secret != "" {
 			redacted = strings.ReplaceAll(redacted, secret, "<redacted:"+name+">")
 		}
 	}
 	return redacted
+}
+
+// waitForSandboxClaimReady polls the SandboxClaim until it's Ready or timeout is reached.
+// This is a workaround for kubectl wait not working reliably with some CRDs.
+func waitForSandboxClaimReady(namespace, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 2 * time.Second
+
+	for time.Now().Before(deadline) {
+		output, err := kubectlOutput("get", "sandboxclaim", name, "-n", namespace,
+			"-o", "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}")
+		if err == nil && strings.TrimSpace(output) == "True" {
+			return nil
+		}
+		time.Sleep(pollInterval)
+	}
+	return fmt.Errorf("timeout waiting for SandboxClaim %s/%s to be Ready after %v", namespace, name, timeout)
 }
