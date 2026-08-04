@@ -45,15 +45,53 @@ import_image "${ROOT_DIR}/dist/ai-factory-server.tar" "ai-factory-server"
 import_image "${ROOT_DIR}/dist/coding-agent-sandbox.tar" "coding-agent-sandbox"
 import_image "${ROOT_DIR}/dist/agent-sandbox-controller.tar" "agent-sandbox-controller"
 
-# 2. 升级 Helm chart（应用新的 values.yaml 配置）
+# 2. 加载配置（优先从 ai-factory.env，否则从现有 K8s secret）
 echo ""
-echo "2. 升级 Helm chart..."
+echo "2. 加载配置..."
 
-# 从现有 secret 读取凭证
-GITHUB_TOKEN=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.GITHUB_TOKEN}' 2>/dev/null | base64 -d || echo "")
-WEBHOOK_SECRET=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.WEBHOOK_SECRET}' 2>/dev/null | base64 -d || echo "")
-OPENAI_API_KEY=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.OPENAI_API_KEY}' 2>/dev/null | base64 -d || echo "")
-CODEX_API_KEY=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.CODEX_API_KEY}' 2>/dev/null | base64 -d || echo "")
+ENV_FILE="${ROOT_DIR}/scripts/ai-factory.env"
+
+# 从现有 K8s secret 读取凭证（作为 fallback）
+GITHUB_TOKEN=""
+WEBHOOK_SECRET=""
+OPENAI_API_KEY=""
+CODEX_API_KEY=""
+
+if [ -f "${ENV_FILE}" ]; then
+    echo "   从 ${ENV_FILE} 加载配置..."
+    # 解析 .env 文件，跳过注释和空行
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*) ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+            export "${key}=${value}"
+        fi
+    done < "${ENV_FILE}"
+    echo "   ✓ 配置已加载"
+fi
+
+# 凭证：env 文件优先，否则从 K8s secret 读取
+if [ -z "${GITHUB_TOKEN}" ]; then
+    GITHUB_TOKEN=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.GITHUB_TOKEN}' 2>/dev/null | base64 -d || echo "")
+fi
+if [ -z "${WEBHOOK_SECRET}" ]; then
+    WEBHOOK_SECRET=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.WEBHOOK_SECRET}' 2>/dev/null | base64 -d || echo "")
+fi
+if [ -z "${OPENAI_API_KEY}" ]; then
+    OPENAI_API_KEY=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.OPENAI_API_KEY}' 2>/dev/null | base64 -d || echo "")
+fi
+if [ -z "${CODEX_API_KEY}" ]; then
+    CODEX_API_KEY=$(kubectl get secret ai-factory-credentials -n "${NAMESPACE}" -o jsonpath='{.data.CODEX_API_KEY}' 2>/dev/null | base64 -d || echo "")
+fi
+
+# 3. 升级 Helm chart
+echo ""
+echo "3. 升级 Helm chart..."
 
 CHART_PATH="${ROOT_DIR}/charts/ai-factory"
 if [ ! -d "${CHART_PATH}" ]; then
@@ -61,24 +99,53 @@ if [ ! -d "${CHART_PATH}" ]; then
     exit 1
 fi
 
+HELM_ARGS=(
+    --set github.token="${GITHUB_TOKEN}"
+    --set webhook.secret="${WEBHOOK_SECRET}"
+    --set openai.apiKey="${OPENAI_API_KEY}"
+    --set openai.codexApiKey="${CODEX_API_KEY}"
+)
+
+# 模型配置：env 文件有值则传给 helm，否则使用 chart 默认值
+[ -n "${OPENAI_BASE_URL:-}" ] && HELM_ARGS+=(--set openai.baseUrl="${OPENAI_BASE_URL}")
+[ -n "${OPENAI_MODEL:-}" ] && HELM_ARGS+=(--set openai.model="${OPENAI_MODEL}")
+[ -n "${OPENAI_TEMPERATURE:-}" ] && HELM_ARGS+=(--set openai.temperature="${OPENAI_TEMPERATURE}")
+[ -n "${OPENAI_MAX_TOKENS:-}" ] && HELM_ARGS+=(--set openai.maxTokens="${OPENAI_MAX_TOKENS}")
+[ -n "${OPENAI_MAX_TOOL_ROUNDS:-}" ] && HELM_ARGS+=(--set openai.maxToolRounds="${OPENAI_MAX_TOOL_ROUNDS}")
+[ -n "${OPENAI_MAX_FINAL_SCRIPT_ROUNDS:-}" ] && HELM_ARGS+=(--set openai.maxFinalScriptRounds="${OPENAI_MAX_FINAL_SCRIPT_ROUNDS}")
+[ -n "${OPENAI_MAX_REPAIR_ROUNDS:-}" ] && HELM_ARGS+=(--set openai.maxRepairRounds="${OPENAI_MAX_REPAIR_ROUNDS}")
+[ -n "${OPENAI_TOTAL_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.totalTimeoutSeconds="${OPENAI_TOTAL_TIMEOUT_SECONDS}")
+[ -n "${OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.explorationRequestTimeoutSeconds="${OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS}")
+[ -n "${OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.finalRequestTimeoutSeconds="${OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS}")
+[ -n "${OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.repairRequestTimeoutSeconds="${OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS}")
+[ -n "${AI_FACTORY_GIT_PROXY:-}" ] && HELM_ARGS+=(--set gitProxy="${AI_FACTORY_GIT_PROXY}")
+
 helm upgrade --install ai-factory "${CHART_PATH}" \
     --namespace "${NAMESPACE}" \
     --create-namespace \
-    --set github.token="${GITHUB_TOKEN}" \
-    --set webhook.secret="${WEBHOOK_SECRET}" \
-    --set openai.apiKey="${OPENAI_API_KEY}" \
-    --set openai.codexApiKey="${CODEX_API_KEY}"
+    "${HELM_ARGS[@]}"
 
 echo "   ✓ Helm chart 已升级"
 
-# 3. 等待 server 就绪
+# 4. 等待 server 就绪
 echo ""
-echo "3. 等待 ai-factory-server 就绪..."
+echo "4. 等待 ai-factory-server 就绪..."
 kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
 
-# 4. 重建 sandbox warm pool pods（使用新镜像）
+# 5. 重启 agent-sandbox 控制器（确保使用新版本）
 echo ""
-echo "4. 重建 sandbox pods..."
+echo "5. 重启 agent-sandbox 控制器..."
+if kubectl get deployment agent-sandbox-controller -n agent-sandbox-system &>/dev/null; then
+    kubectl rollout restart deployment/agent-sandbox-controller -n agent-sandbox-system
+    kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
+    echo "   ✓ agent-sandbox 控制器已重启"
+else
+    echo "   ⚠ agent-sandbox 控制器未找到，跳过"
+fi
+
+# 6. 重建 sandbox warm pool pods（使用新镜像）
+echo ""
+echo "6. 重建 sandbox pods..."
 OLD_PODS=$(kubectl get pods -n "${NAMESPACE}" -o name 2>/dev/null | grep go-dev || true)
 if [ -n "${OLD_PODS}" ]; then
     echo "${OLD_PODS}" | xargs kubectl delete -n "${NAMESPACE}" 2>/dev/null || true
@@ -86,7 +153,7 @@ if [ -n "${OLD_PODS}" ]; then
 fi
 echo "   ✓ 等待 warm pool 重建..."
 
-# 5. 显示状态
+# 7. 显示状态
 echo ""
 echo "=== 升级完成 ==="
 echo ""
