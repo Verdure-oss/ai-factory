@@ -8,6 +8,12 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/dist"
 AGENT_SANDBOX_REPO="https://github.com/kubernetes-sigs/agent-sandbox.git"
 
+# 强制清理旧的 agent-sandbox 源码（确保使用最新版本）
+if [[ -n "${AGENT_SANDBOX_SRC:-}" ]] && [[ -d "${AGENT_SANDBOX_SRC}" ]]; then
+    echo "⚠ 清理旧的 agent-sandbox 源码: ${AGENT_SANDBOX_SRC}"
+    rm -rf "${AGENT_SANDBOX_SRC}"
+fi
+
 # 检测容器构建工具（优先 nerdctl，其次 docker）
 CONTAINER_CMD=""
 if command -v nerdctl &> /dev/null && command -v buildkitd &> /dev/null; then
@@ -154,13 +160,16 @@ build_controller() {
 if [[ -z "${AGENT_SANDBOX_SRC}" ]]; then
     AGENT_SANDBOX_SRC=$(mktemp -d)
     CLEANUP_SANDBOX_SRC=true
-    echo "   克隆 agent-sandbox 仓库..."
+    echo "   克隆 agent-sandbox 仓库（最新版本）..."
     if git clone --depth=1 "${AGENT_SANDBOX_REPO}" "${AGENT_SANDBOX_SRC}" 2>/dev/null; then
+        # 显示克隆的版本信息
+        echo "   ✓ 克隆成功，版本: $(cd "${AGENT_SANDBOX_SRC}" && git log --oneline -1)"
         if build_controller "${AGENT_SANDBOX_SRC}"; then
             CONTROLLER_BUILD_SUCCESS=true
         fi
     else
         echo "   ⚠ 无法克隆 agent-sandbox 仓库（可能需要网络代理）"
+        echo "   提示: 设置 AGENT_SANDBOX_SRC 环境变量指向本地仓库"
     fi
 else
     # 使用本地源

@@ -118,14 +118,14 @@ SetTaskDone() 添加 ai-factory-done → issues.labeled (TriggerLabel=ai-factory
 - [x] 实现问题三：并发 Webhook 竞态处理（高优先级）✅ 已完成
 - [ ] 讨论问题四：服务器重启后任务恢复（低优先级）
 - [ ] 讨论问题五：Issue 关闭时任务处理（低优先级）
-- [ ] 编写执行文档：打包与部署流程
-  - [ ] 本地打包流程（`scripts/package.sh` 使用说明）
-  - [ ] 远程部署流程（`dist/deploy-remote.sh` 使用说明）
-  - [ ] 环境要求（K8s 集群、kubectl、helm 版本等）
-  - [ ] 凭证配置说明（GitHub Token、Webhook Secret、OpenAI API Key）
-  - [ ] 验证部署是否成功（健康检查、warm pool 状态、webhook 测试）
-  - [ ] GitHub 仓库 Webhook 配置指引
-  - [ ] 常见问题排查
+- [x] 编写执行文档：打包与部署流程 ✅ 已完成
+  - [x] 本地打包流程（`scripts/package.sh` 使用说明）✅ 已完成
+  - [x] 远程部署流程（`dist/deploy-remote.sh` 使用说明）✅ 已完成
+  - [x] 环境要求（K8s 集群、kubectl、helm 版本等）✅ 已完成
+  - [x] 凭证配置说明（GitHub Token、Webhook Secret、OpenAI API Key）✅ 已完成
+  - [x] 验证部署是否成功（健康检查、warm pool 状态、webhook 测试）✅ 已完成
+  - [x] GitHub 仓库 Webhook 配置指引 ✅ 已完成
+  - [x] 常见问题排查 ✅ 已完成
 - [x] 实现配置热更新：Secret 文件挂载 + 补齐 model/url/base_url 交互式配置 ✅ 已完成
 
 ## 问题描述

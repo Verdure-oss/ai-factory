@@ -184,6 +184,17 @@ echo ""
 echo "5. 等待部署完成..."
 kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=60s
 
+# 重启 agent-sandbox 控制器（确保使用新版本）
+echo ""
+echo "5.1 重启 agent-sandbox 控制器..."
+if kubectl get deployment agent-sandbox-controller -n agent-sandbox-system &>/dev/null; then
+    kubectl rollout restart deployment/agent-sandbox-controller -n agent-sandbox-system
+    kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=60s
+    echo "   ✓ agent-sandbox 控制器已重启"
+else
+    echo "   ⚠ agent-sandbox 控制器未找到"
+fi
+
 # 6. 显示状态
 echo ""
 echo "=== 部署完成 ==="
