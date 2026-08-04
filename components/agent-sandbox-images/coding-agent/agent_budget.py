@@ -151,6 +151,7 @@ def post_chat_completion(
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "ai-factory-agent/1.0",
             },
             method="POST",
         )
