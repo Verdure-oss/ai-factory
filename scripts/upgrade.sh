@@ -132,20 +132,29 @@ echo ""
 echo "4. 等待 ai-factory-server 就绪..."
 kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
 
-# 5. 重启 agent-sandbox 控制器（确保使用新版本）
+# 5. 更新 agent-sandbox 控制器镜像（确保使用新版本）
 echo ""
-echo "5. 重启 agent-sandbox 控制器..."
+echo "5. 更新 agent-sandbox 控制器..."
 if kubectl get deployment agent-sandbox-controller -n agent-sandbox-system &>/dev/null; then
-    kubectl rollout restart deployment/agent-sandbox-controller -n agent-sandbox-system
+    # 更新镜像（不只是重启）
+    kubectl set image deployment/agent-sandbox-controller \
+        agent-sandbox-controller=ai-factory/agent-sandbox-controller:latest \
+        -n agent-sandbox-system
     kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
-    echo "   ✓ agent-sandbox 控制器已重启"
+    echo "   ✓ agent-sandbox 控制器已更新"
 else
     echo "   ⚠ agent-sandbox 控制器未找到，跳过"
 fi
 
-# 6. 重建 sandbox warm pool pods（使用新镜像）
+# 6. 删除旧的 SandboxClaim（让新控制器重新创建，正确注入环境变量）
 echo ""
-echo "6. 重建 sandbox pods..."
+echo "6. 清理旧的 SandboxClaim..."
+kubectl delete sandboxclaim -n "${NAMESPACE}" --all 2>/dev/null || true
+echo "   ✓ 旧的 SandboxClaim 已删除"
+
+# 7. 重建 sandbox warm pool pods（使用新镜像）
+echo ""
+echo "7. 重建 sandbox pods..."
 OLD_PODS=$(kubectl get pods -n "${NAMESPACE}" -o name 2>/dev/null | grep go-dev || true)
 if [ -n "${OLD_PODS}" ]; then
     echo "${OLD_PODS}" | xargs kubectl delete -n "${NAMESPACE}" 2>/dev/null || true
@@ -153,7 +162,7 @@ if [ -n "${OLD_PODS}" ]; then
 fi
 echo "   ✓ 等待 warm pool 重建..."
 
-# 7. 显示状态
+# 8. 显示状态
 echo ""
 echo "=== 升级完成 ==="
 echo ""

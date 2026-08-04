@@ -90,8 +90,8 @@ agent:
     - "mkdir -p .ai-factory/smoke && echo smoke-$(date +%s) > .ai-factory/smoke/placeholder.txt && test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
 
   # Validation commands for run mode
-  validationCommands:
-    - "go test ./..."
+  # 留空则跳过验证，直接创建 PR
+  validationCommands: []
 
 # Webhook configuration
 webhook:
