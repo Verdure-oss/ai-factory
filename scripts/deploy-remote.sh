@@ -139,6 +139,21 @@ if [ -z "${OPENAI_API_KEY:-}" ]; then
     read -p "OpenAI API Key: " OPENAI_API_KEY
 fi
 
+# 收集可选配置
+if [ -z "${OPENAI_BASE_URL:-}" ]; then
+    read -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL
+    OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+fi
+
+if [ -z "${OPENAI_MODEL:-}" ]; then
+    read -p "OpenAI Model [gpt-4.1]: " OPENAI_MODEL
+    OPENAI_MODEL="${OPENAI_MODEL:-gpt-4.1}"
+fi
+
+if [ -z "${AI_FACTORY_GIT_PROXY:-}" ]; then
+    read -p "Git Proxy (optional, e.g. https://ghproxy.net): " AI_FACTORY_GIT_PROXY
+fi
+
 # 保存到 env 文件（首次部署时创建，方便后续热更新）
 if [ ! -f "${ENV_FILE}" ]; then
     cat > "${ENV_FILE}" <<EOF
@@ -148,6 +163,9 @@ if [ ! -f "${ENV_FILE}" ]; then
 GITHUB_TOKEN=${GITHUB_TOKEN}
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
+OPENAI_BASE_URL=${OPENAI_BASE_URL}
+OPENAI_MODEL=${OPENAI_MODEL}
+AI_FACTORY_GIT_PROXY=${AI_FACTORY_GIT_PROXY}
 EOF
     echo "   ✓ 配置已保存到 ${ENV_FILE}"
 fi
@@ -172,12 +190,25 @@ if ! command -v helm &> /dev/null; then
 fi
 
 echo "   使用 chart: ${CHART_PATH}"
+
+# 构建 helm 参数
+HELM_ARGS=(
+    --set github.token="${GITHUB_TOKEN}"
+    --set webhook.secret="${WEBHOOK_SECRET}"
+    --set openai.apiKey="${OPENAI_API_KEY}"
+    --set openai.baseUrl="${OPENAI_BASE_URL}"
+    --set openai.model="${OPENAI_MODEL}"
+)
+
+# 添加可选配置
+if [ -n "${AI_FACTORY_GIT_PROXY:-}" ]; then
+    HELM_ARGS+=(--set gitProxy="${AI_FACTORY_GIT_PROXY}")
+fi
+
 helm upgrade --install ai-factory "${CHART_PATH}" \
     --namespace "${NAMESPACE}" \
     --create-namespace \
-    --set github.token="${GITHUB_TOKEN}" \
-    --set webhook.secret="${WEBHOOK_SECRET}" \
-    --set openai.apiKey="${OPENAI_API_KEY}"
+    "${HELM_ARGS[@]}"
 
 # 5. 等待部署完成
 echo ""
