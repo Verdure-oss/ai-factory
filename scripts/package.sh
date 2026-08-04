@@ -67,15 +67,28 @@ setup_proxy() {
 setup_proxy
 echo ""
 
-# 生成代理 build-arg（用于容器内部网络请求）
+# 生成代理 build-arg（用于容器内部网络请求）。
+# 注意：构建容器内 127.0.0.1/localhost 指向容器自身而非宿主机，必须把代理地址改写为
+# 宿主机别名 host.docker.internal，并配合 --add-host=host-gateway（Linux / Docker Desktop 均可解析）。
+BUILD_HOST_ALIAS="host.docker.internal"
+BUILD_EXTRA_ARGS=(--add-host="${BUILD_HOST_ALIAS}:host-gateway")
+
+# 把宿主机代理地址改写为容器内可访问的地址
+container_proxy_url() {
+    local url="$1"
+    url="${url//127.0.0.1/${BUILD_HOST_ALIAS}}"
+    url="${url//localhost/${BUILD_HOST_ALIAS}}"
+    printf '%s' "${url}"
+}
+
 PROXY_BUILD_ARGS=()
 if [[ -n "${http_proxy:-}" ]]; then
-    PROXY_BUILD_ARGS+=(--build-arg "http_proxy=${http_proxy}")
-    PROXY_BUILD_ARGS+=(--build-arg "HTTP_PROXY=${HTTP_PROXY:-${http_proxy}}")
+    PROXY_BUILD_ARGS+=(--build-arg "http_proxy=$(container_proxy_url "${http_proxy}")")
+    PROXY_BUILD_ARGS+=(--build-arg "HTTP_PROXY=$(container_proxy_url "${HTTP_PROXY:-${http_proxy}}")")
 fi
 if [[ -n "${https_proxy:-}" ]]; then
-    PROXY_BUILD_ARGS+=(--build-arg "https_proxy=${https_proxy}")
-    PROXY_BUILD_ARGS+=(--build-arg "HTTPS_PROXY=${HTTPS_PROXY:-${https_proxy}}")
+    PROXY_BUILD_ARGS+=(--build-arg "https_proxy=$(container_proxy_url "${https_proxy}")")
+    PROXY_BUILD_ARGS+=(--build-arg "HTTPS_PROXY=$(container_proxy_url "${HTTPS_PROXY:-${https_proxy}}")")
 fi
 if [[ -n "${no_proxy:-}" ]]; then
     PROXY_BUILD_ARGS+=(--build-arg "no_proxy=${no_proxy}")
@@ -87,14 +100,14 @@ mkdir -p "${OUTPUT_DIR}"
 
 # 1. 构建 server 镜像
 echo "1. 构建 ai-factory-server 镜像..."
-${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
+${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
 ${CONTAINER_CMD} save ai-factory-server:latest > "${OUTPUT_DIR}/ai-factory-server.tar"
 echo "   ✓ ai-factory-server.tar"
 
 # 2. 构建 sandbox 镜像
 echo "2. 构建 coding-agent-sandbox 镜像..."
 GO_VERSION="$(awk '/^go / {print $2; exit}' "${ROOT_DIR}/go.mod")"
-${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" \
+${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" \
     --build-arg GO_VERSION="${GO_VERSION}" \
     --build-arg INSTALL_CODEX_CLI=true \
     -t coding-agent-sandbox:latest \
@@ -110,49 +123,36 @@ CONTROLLER_BUILD_SUCCESS=false
 
 # 预期的镜像名称
 EXPECTED_IMAGE="ai-factory/agent-sandbox-controller:latest"
-# push-images 脚本实际生成的镜像名称（根据实际测试）
-ACTUAL_IMAGE="localhost/ai-factory/agent-sandbox-controller:dev"
 
 build_controller() {
     local src_dir="$1"
 
-    # 检查 push-images 脚本是否存在
-    if [[ ! -f "${src_dir}/dev/tools/push-images" ]]; then
-        echo "   ⚠ push-images 脚本不存在"
+    # 检查控制器 Dockerfile 是否存在
+    if [[ ! -f "${src_dir}/Dockerfile" ]]; then
+        echo "   ⚠ agent-sandbox 仓库中没有控制器 Dockerfile"
         return 1
     fi
 
-    # 运行 push-images 脚本
-    echo "   运行 push-images 脚本..."
-    if IMAGE_PREFIX="ai-factory" IMAGE_TAG="latest" \
-        "${src_dir}/dev/tools/push-images" \
-        --image-prefix="ai-factory" \
-        --image-tag="latest" \
-        --controller-only; then
+    # 不用上游 push-images（依赖 python3、buildx 且推送到 registry，不适合本地打包），
+    # 直接 docker build 并导出 tar，与前面 server/sandbox 镜像的构建方式保持一致。
+    echo "   构建 agent-sandbox-controller 镜像..."
+    local git_version git_sha build_date
+    git_version=$(git -C "${src_dir}" describe --always --dirty 2>/dev/null || echo unknown)
+    git_sha=$(git -C "${src_dir}" rev-parse --short HEAD 2>/dev/null || echo unknown)
+    build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-        # 检查预期的镜像是否存在
-        if ${CONTAINER_CMD} image inspect "${EXPECTED_IMAGE}" &>/dev/null; then
-            echo "   ✓ 镜像 ${EXPECTED_IMAGE} 构建成功"
-        else
-            # 检查实际生成的镜像
-            if ${CONTAINER_CMD} image inspect "${ACTUAL_IMAGE}" &>/dev/null; then
-                echo "   ⚠ 镜像标签不匹配，重新打标签..."
-                echo "   预期: ${EXPECTED_IMAGE}"
-                echo "   实际: ${ACTUAL_IMAGE}"
-                ${CONTAINER_CMD} tag "${ACTUAL_IMAGE}" "${EXPECTED_IMAGE}"
-                echo "   ✓ 已重新打标签为 ${EXPECTED_IMAGE}"
-            else
-                echo "   ⚠ 未找到构建的镜像"
-                return 1
-            fi
-        fi
-
-        # 保存镜像
+    if ${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" \
+        --build-arg "GIT_VERSION=${git_version}" \
+        --build-arg "GIT_SHA=${git_sha}" \
+        --build-arg "BUILD_DATE=${build_date}" \
+        -t "${EXPECTED_IMAGE}" \
+        -f "${src_dir}/Dockerfile" \
+        "${src_dir}"; then
         ${CONTAINER_CMD} save "${EXPECTED_IMAGE}" > "${OUTPUT_DIR}/agent-sandbox-controller.tar"
         echo "   ✓ agent-sandbox-controller.tar"
         return 0
     else
-        echo "   ⚠ push-images 脚本执行失败"
+        echo "   ⚠ 控制器镜像构建失败"
         return 1
     fi
 }
