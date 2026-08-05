@@ -100,7 +100,9 @@ mkdir -p "${OUTPUT_DIR}"
 
 # 1. 构建 server 镜像
 echo "1. 构建 ai-factory-server 镜像..."
-${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
+${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" \
+    --provenance=false --sbom=false \
+    -t ai-factory-server:latest -f "${ROOT_DIR}/Dockerfile.server" "${ROOT_DIR}"
 ${CONTAINER_CMD} save ai-factory-server:latest > "${OUTPUT_DIR}/ai-factory-server.tar"
 echo "   ✓ ai-factory-server.tar"
 
@@ -108,6 +110,7 @@ echo "   ✓ ai-factory-server.tar"
 echo "2. 构建 coding-agent-sandbox 镜像..."
 GO_VERSION="$(awk '/^go / {print $2; exit}' "${ROOT_DIR}/go.mod")"
 ${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" \
+    --provenance=false --sbom=false \
     --build-arg GO_VERSION="${GO_VERSION}" \
     --build-arg INSTALL_CODEX_CLI=true \
     -t coding-agent-sandbox:latest \
@@ -142,6 +145,7 @@ build_controller() {
     build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     if ${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" \
+        --provenance=false --sbom=false \
         --build-arg "GIT_VERSION=${git_version}" \
         --build-arg "GIT_SHA=${git_sha}" \
         --build-arg "BUILD_DATE=${build_date}" \
