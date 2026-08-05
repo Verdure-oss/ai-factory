@@ -81,6 +81,10 @@ func Reconcile(task *FactoryTask) (*ReconcileOutput, error) {
 			"warmPoolRef": map[string]interface{}{
 				"name": plan.SandboxTemplate,
 			},
+			"lifecycle": map[string]interface{}{
+				"shutdownPolicy":        "Delete",
+				"ttlSecondsAfterFinished": 300,
+			},
 		},
 	}
 	if task.Spec.ChangeRequest.Enabled && plan.GitAuthTokenEnv != "" {

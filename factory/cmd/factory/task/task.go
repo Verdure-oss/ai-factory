@@ -739,6 +739,11 @@ func patchTaskStatus(namespace, name string, opts taskpkg.StatusPatchOptions) er
 	return runKubectl(nil, "patch", "factorytask", name, "-n", namespace, "--type=merge", "--subresource=status", "-p", string(patch))
 }
 
+// cleanupSandboxClaim deletes the SandboxClaim resource. Called when a task reaches terminal state.
+func cleanupSandboxClaim(namespace, name string) {
+	_ = runKubectl(nil, "delete", "sandboxclaim", name, "-n", namespace, "--ignore-not-found")
+}
+
 func executeTask(out io.Writer, task *taskpkg.FactoryTask, taskData []byte, applyTask bool, timeout time.Duration, controllerName string) error {
 	output, err := taskpkg.Reconcile(task)
 	if err != nil {
@@ -751,6 +756,8 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, taskData []byte, appl
 
 	namespace := output.SandboxClaim.Metadata.Namespace
 	claim := output.SandboxClaim.Metadata.Name
+	// Clean up SandboxClaim when task reaches terminal state (succeeded or failed).
+	defer cleanupSandboxClaim(namespace, claim)
 	if applyTask {
 		if err := runKubectlWithInput(taskData, "apply", "-f", "-"); err != nil {
 			return err

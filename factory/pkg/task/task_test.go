@@ -591,6 +591,18 @@ spec:
 		t.Fatalf("task label = %q", got)
 	}
 
+	// Verify lifecycle is set for auto-cleanup
+	lifecycle, ok := output.SandboxClaim.Spec["lifecycle"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("lifecycle not set in SandboxClaim spec")
+	}
+	if lifecycle["shutdownPolicy"] != "Delete" {
+		t.Fatalf("shutdownPolicy = %v, want Delete", lifecycle["shutdownPolicy"])
+	}
+	if lifecycle["ttlSecondsAfterFinished"] != 300 {
+		t.Fatalf("ttlSecondsAfterFinished = %v, want 300", lifecycle["ttlSecondsAfterFinished"])
+	}
+
 	data, err := output.SandboxClaimYAML()
 	if err != nil {
 		t.Fatalf("SandboxClaimYAML() error = %v", err)

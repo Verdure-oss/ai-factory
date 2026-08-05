@@ -129,6 +129,9 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 
 	namespace := output.SandboxClaim.Metadata.Namespace
 	claim := output.SandboxClaim.Metadata.Name
+	// Clean up SandboxClaim when task reaches terminal state (succeeded or failed).
+	// TTL on the claim is a safety net; this is the primary cleanup path.
+	defer cleanupSandboxClaim(namespace, claim)
 
 	if err := patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
 		Phase:            taskpkg.PhasePending,
@@ -667,6 +670,11 @@ func redactSensitive(value string) string {
 		}
 	}
 	return redacted
+}
+
+// cleanupSandboxClaim deletes the SandboxClaim resource. Called when a task reaches terminal state.
+func cleanupSandboxClaim(namespace, name string) {
+	_ = runKubectl(nil, "delete", "sandboxclaim", name, "-n", namespace, "--ignore-not-found")
 }
 
 // waitForSandboxClaimReady polls the SandboxClaim until it's Ready or timeout is reached.
