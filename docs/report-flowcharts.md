@@ -1,6 +1,6 @@
 # ai-factory 自托管服务汇报流程图
 
-> 本文档包含 ai-factory 自托管服务的 7 幅 Mermaid 流程图，用于进度汇报。
+> 本文档包含 ai-factory 自托管服务的 10 幅 Mermaid 流程图，用于进度汇报。
 > Mermaid 可直接在 GitHub、Typora、VS Code 等支持渲染的 Markdown 阅读器中显示。
 > 每幅图控制在单屏内可完整截取，节点文案已精简，详细说明见 `docs/` 下的设计文档。
 
@@ -13,6 +13,9 @@
 5. [标签状态机](#5-标签状态机)
 6. [三个镜像的协作](#6-三个镜像的协作)
 7. [三个镜像的泳道协作](#7-三个镜像的泳道协作)
+8. [agent-sandbox 资源拓扑](#8-agent-sandbox-资源拓扑)
+9. [暖池生命周期](#9-暖池生命周期)
+10. [Claim 全生命周期](#10-claim-全生命周期)
 
 ---
 
@@ -213,6 +216,103 @@ flowchart LR
     B2 -->|绑定已运行 Pod| C1
     C1 --> C2 --> C3
     C3 -->|完成| A5
+```
+
+---
+
+## 8. agent-sandbox 资源拓扑
+
+**一句话说明**：静态结构——4 个 CRD 的关系。`SandboxTemplate` 定义 Pod 模板（不建 Pod）；`SandboxWarmPool` 引用模板做预热；`SandboxClaim` 引用模板 + 暖池 + 注入 env 申请沙箱；`Sandbox` 是 Claim 名下的沙箱实例抽象（owner 指向 Claim，是级联删除的钩子）；实际 Pod 由 Sandbox 控制器创建。agent-sandbox 控制器 watch 全部 4 种 CRD。
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontSize":"26px"}}}%%
+flowchart TD
+    classDef template fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef pool fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef claim fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef sandbox fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+
+    T["SandboxTemplate<br/>go-dev<br/>纯模板（不建 Pod）"]:::template
+    W["SandboxWarmPool<br/>go-dev<br/>replicas: 2 预热"]:::pool
+    C["SandboxClaim<br/>github-...-claim<br/>模板 + 暖池 + env"]:::claim
+    S["Sandbox<br/>github-...-claim<br/>owner→Claim<br/>模板 spec+合并 env"]:::sandbox
+    P["Pod<br/>github-...-claim<br/>注入 env 运行"]:::sandbox
+
+    T -->|"引用 templateRef"| W
+    T -->|"引用 templateRef"| C
+    W -->|"引用 warmPoolRef"| C
+    C -->|"ownerReferences<br/>级联删除钩子"| S
+    S -->|"创建并管理"| P
+```
+
+---
+
+## 9. 暖池生命周期
+
+**一句话说明**：`SandboxWarmPool` 声明 `replicas: 2`，控制器创建对应数量的空闲 Sandbox/Pod 待命；被 Claim 认领消耗名额后，控制器自动补充新 Pod，池中始终维持设定数量——**暖池的 Pod 数量固定，不会无限增长**。
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontSize":"26px"}}}%%
+flowchart TD
+    classDef pool fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef pod fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+
+    A["SandboxWarmPool<br/>go-dev replicas: 2<br/>声明期望数量"]:::pool
+    B["控制器创建 N 个<br/>空闲 Sandbox<br/>（warm-pool 标签）"]:::pool
+    C["对应 N 个 Pod<br/>go-dev-xxx 待命<br/>镜像已预热"]:::pod
+    D["被 Claim 认领 1 个<br/>名额空出"]:::pod
+    E["控制器检测空缺<br/>补充新 Sandbox + Pod<br/>回到待命"]:::pool
+
+    A --> B --> C
+    C --> D
+    D --> E
+    E --> C
+```
+
+---
+
+## 10. Claim 全生命周期（泳道）
+
+**一句话说明**：一个任务从申请沙箱到回收的完整过程，三泳道表示 server / 控制器 / Sandbox Pod 各自职责。交接点：server 只提交 Claim、读回 Pod 名、`kubectl exec`、删 Claim；中间的分配、建 Sandbox、建 Pod、回写状态、补充暖池全由控制器声明式完成；删除 Claim 靠 `ownerReferences` 级联回收 Sandbox + Pod。
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontSize":"26px"}}}%%
+flowchart LR
+    classDef server fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef ctrl fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef pod fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+
+    subgraph SRV["① ai-factory-server"]
+        direction TB
+        A1["创建 SandboxClaim<br/>warmPoolRef: go-dev<br/>注入 env"]:::server
+        A2["读 claim.status<br/>拿 Pod 名<br/>kubectl exec 执行"]:::server
+        A3["任务完成<br/>删除 SandboxClaim"]:::server
+    end
+
+    subgraph CTRL["② agent-sandbox 控制器"]
+        direction TB
+        B1["找空闲暖池<br/>Sandbox 绑定<br/>占用名额"]:::ctrl
+        B2["创建 Claim 专属<br/>Sandbox（复制模板<br/>+ 合并 env，owner→claim）"]:::ctrl
+        B3["回写 claim.status<br/>sandbox.name<br/>Ready=True"]:::ctrl
+        B4["名额空缺<br/>补充新 go-dev"]:::ctrl
+    end
+
+    subgraph SBX["③ Sandbox Pod"]
+        direction TB
+        C1["Sandbox 控制器<br/>创建 Pod<br/>（env 已注入）"]:::pod
+        C2["Pod Ready<br/>运行任务"]:::pod
+        C3["Claim 删除后<br/>级联回收<br/>Sandbox + Pod"]:::pod
+    end
+
+    A1 -->|"kubectl apply"| B1
+    B1 --> B2
+    B2 -->|"创建"| C1
+    C1 --> C2
+    C2 -->|"Ready"| B3
+    B3 -->|"返回 Pod 名"| A2
+    A2 -->|"kubectl exec"| C2
+    A3 -->|"kubectl delete"| C3
+    B1 -.->|"消耗名额"| B4
 ```
 
 ---
