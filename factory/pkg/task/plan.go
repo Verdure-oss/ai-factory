@@ -75,6 +75,8 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 		agentCommand = "ai-factory-agent openai-compatible"
 	}
 
+	useFork := task.Spec.ChangeRequest.ForkOwner != ""
+
 	plan := &ExecutionPlan{
 		TaskName:        task.Metadata.Name,
 		Provider:        task.Spec.Source.Provider,
@@ -101,11 +103,14 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 				Name:    "clone repository",
 				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("git -c http.version=HTTP/1.1 clone %s %s", shellQuote(cloneURL), shellQuote(workDir))},
 			},
-			{
-				Name:    "checkout base ref",
-				Command: []string{"git", "-C", workDir, "checkout", task.Spec.Source.BaseRef},
-			},
 		},
+	}
+
+	if !useFork {
+		plan.Steps = append(plan.Steps, ExecutionStep{
+			Name:    "checkout base ref",
+			Command: []string{"git", "-C", workDir, "checkout", task.Spec.Source.BaseRef},
+		})
 	}
 
 	if task.Spec.ChangeRequest.Enabled {
@@ -123,10 +128,18 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 				Command: []string{"/bin/sh", "-lc", configureGitProxyScript()},
 			},
 		}, plan.Steps...)
-		plan.Steps = append(plan.Steps, ExecutionStep{
-			Name:    "create change branch",
-			Command: []string{"git", "-C", workDir, "checkout", "-B", changeBranch},
-		})
+		if useFork {
+			upstreamURL, err := upstreamRepoURL(task)
+			if err != nil {
+				return nil, err
+			}
+			plan.Steps = append(plan.Steps, forkBranchSetupSteps(workDir, changeBranch, targetBranch, upstreamURL)...)
+		} else {
+			plan.Steps = append(plan.Steps, ExecutionStep{
+				Name:    "create change branch",
+				Command: []string{"git", "-C", workDir, "checkout", "-B", changeBranch},
+			})
+		}
 	}
 
 	if strings.TrimSpace(task.Spec.Work.Instructions) != "" {
@@ -157,6 +170,43 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 	}
 
 	return plan, nil
+}
+
+func upstreamRepoURL(task *FactoryTask) (string, error) {
+	host := task.Spec.Source.Host
+	switch task.Spec.Source.Provider {
+	case ProviderGitHub:
+		if host == "" {
+			host = "github.com"
+		}
+	case ProviderGitLab:
+		if host == "" {
+			host = "gitlab.com"
+		}
+	default:
+		return "", fmt.Errorf("unsupported git provider %q", task.Spec.Source.Provider)
+	}
+	return fmt.Sprintf("https://%s/%s.git", host, strings.TrimPrefix(task.Spec.Source.Repository, "/")), nil
+}
+
+func forkBranchSetupSteps(workDir, changeBranch, targetBranch, upstreamURL string) []ExecutionStep {
+	addUpstream := fmt.Sprintf("git -C %s remote add upstream %s 2>/dev/null || git -C %s remote set-url upstream %s",
+		shellQuote(workDir), shellQuote(upstreamURL), shellQuote(workDir), shellQuote(upstreamURL))
+	fetchUpstream := fmt.Sprintf("git -C %s fetch upstream %s", shellQuote(workDir), shellQuote(targetBranch))
+	return []ExecutionStep{
+		{
+			Name:    "add upstream remote",
+			Command: []string{"/bin/sh", "-lc", addUpstream},
+		},
+		{
+			Name:    "fetch upstream",
+			Command: []string{"/bin/sh", "-lc", fetchUpstream},
+		},
+		{
+			Name:    "checkout upstream branch",
+			Command: []string{"git", "-C", workDir, "checkout", "-B", changeBranch, fmt.Sprintf("upstream/%s", targetBranch)},
+		},
+	}
 }
 
 func changeRequestDefaults(task *FactoryTask) (string, string, string, string, string, string, string, string) {

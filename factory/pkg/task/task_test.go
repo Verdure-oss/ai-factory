@@ -194,7 +194,7 @@ spec:
 	if plan.AgentCommand != "ai-factory-agent openai-compatible" {
 		t.Fatalf("AgentCommand = %q", plan.AgentCommand)
 	}
-	if got, want := len(plan.Steps), 3; got != want {
+	if got, want := len(plan.Steps), 4; got != want {
 		t.Fatalf("len(Steps) = %d, want %d", got, want)
 	}
 }
@@ -241,14 +241,14 @@ spec:
 	if plan.GitAuthTokenEnv != "GITHUB_TOKEN" {
 		t.Fatalf("GitAuthTokenEnv = %q", plan.GitAuthTokenEnv)
 	}
-	if got, want := len(plan.Steps), 7; got != want {
+	if got, want := len(plan.Steps), 9; got != want {
 		t.Fatalf("len(Steps) = %d, want %d", got, want)
 	}
 	names := make([]string, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
 		names = append(names, step.Name)
 	}
-	wantNames := []string{"configure git credentials", "clone repository", "checkout base ref", "create change branch", "run command 1", "commit changes", "push change branch"}
+	wantNames := []string{"configure git credentials", "configure git proxy", "clean workspace", "clone repository", "checkout base ref", "create change branch", "run command 1", "commit changes", "push change branch"}
 	if strings.Join(names, ",") != strings.Join(wantNames, ",") {
 		t.Fatalf("step names = %#v", names)
 	}
@@ -256,11 +256,11 @@ spec:
 	if !strings.Contains(authCommand, "GITHUB_TOKEN is required in the sandbox environment for git clone/push") {
 		t.Fatalf("auth command = %#v", plan.Steps[0].Command)
 	}
-	runCommand := strings.Join(plan.Steps[4].Command, " ")
+	runCommand := strings.Join(plan.Steps[6].Command, " ")
 	if !strings.Contains(runCommand, "export PATH=/usr/local/go/bin:$PATH") {
-		t.Fatalf("run command should include sandbox toolchain PATH, got %#v", plan.Steps[4].Command)
+		t.Fatalf("run command should include sandbox toolchain PATH, got %#v", plan.Steps[6].Command)
 	}
-	commitStep := plan.Steps[5]
+	commitStep := plan.Steps[7]
 	commitCommand := strings.Join(commitStep.Command, " ")
 	if !strings.Contains(commitCommand, "rm -f .ai-factory/agent-prompt.md .ai-factory/task-instructions.md") {
 		t.Fatalf("commit command should remove runtime prompt files before staging, got %#v", commitStep.Command)
@@ -274,9 +274,62 @@ spec:
 	if !strings.Contains(commitCommand, "git -c user.name='ai-factory' -c user.email='ai-factory@example.invalid' commit -m 'fix docs from task'") {
 		t.Fatalf("commit command = %#v", commitStep.Command)
 	}
-	pushCommand := strings.Join(plan.Steps[6].Command, " ")
-	if !strings.Contains(pushCommand, "git push --force-with-lease -u 'origin' 'ai-factory/fix-docs'") {
-		t.Fatalf("push command = %#v", plan.Steps[6].Command)
+	pushCommand := strings.Join(plan.Steps[8].Command, " ")
+	if !strings.Contains(pushCommand, "git -c http.version=HTTP/1.1 push --force-with-lease -u 'origin' 'ai-factory/fix-docs'") {
+		t.Fatalf("push command = %#v", plan.Steps[8].Command)
+	}
+}
+
+func TestBuildExecutionPlanWithForkOwner(t *testing.T) {
+	task := &FactoryTask{
+		APIVersion: APIVersion,
+		Kind:       Kind,
+		Metadata:   ObjectMeta{Name: "fork-task"},
+		Spec: FactoryTaskSpec{
+			Source: SourceSpec{
+				Provider:   ProviderGitHub,
+				Host:       "github.com",
+				Repository: "matrixhub-ai/matrixhub",
+				BaseRef:    "main",
+				CloneURL:   "https://github.com/Verdure-oss/matrixhub.git",
+			},
+			Agent:   AgentSpec{Name: "builder"},
+			Sandbox: SandboxSpec{TemplateRef: "go-dev"},
+			Work:    WorkSpec{Instructions: "fix it"},
+			ChangeRequest: ChangeRequestSpec{
+				Enabled:   true,
+				ForkOwner: "Verdure-oss",
+			},
+		},
+	}
+	plan, err := BuildExecutionPlan(task)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.ChangeBranch != "factory-task/fork-task" {
+		t.Fatalf("got changeBranch %q", plan.ChangeBranch)
+	}
+	var names []string
+	for _, step := range plan.Steps {
+		names = append(names, step.Name)
+	}
+	joined := strings.Join(names, ";")
+	for _, want := range []string{"add upstream remote", "fetch upstream", "checkout upstream branch"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("plan steps missing %q: %d:%s", want, len(names), names)
+		}
+	}
+	if strings.Contains(joined, "checkout base ref") || strings.Contains(joined, "create change branch") {
+		t.Fatalf("fork mode must not contain base-ref or create-change-branch steps: %s", names)
+	}
+	// verify the checkout step bases the branch on upstream/main
+	for _, step := range plan.Steps {
+		if step.Name == "checkout upstream branch" {
+			cmd := strings.Join(step.Command, " ")
+			if !strings.Contains(cmd, "upstream/main") || !strings.Contains(cmd, plan.ChangeBranch) {
+				t.Fatalf("checkout upstream branch command %q must reference upstream/main and %q", cmd, plan.ChangeBranch)
+			}
+		}
 	}
 }
 
@@ -356,24 +409,24 @@ spec:
 	if plan.AgentCommand != "codex exec --full-auto" {
 		t.Fatalf("AgentCommand = %q", plan.AgentCommand)
 	}
-	if got, want := len(plan.Steps), 4; got != want {
+	if got, want := len(plan.Steps), 5; got != want {
 		t.Fatalf("len(Steps) = %d, want %d", got, want)
 	}
-	if plan.Steps[2].Name != "run coding agent" {
-		t.Fatalf("step[2].Name = %q", plan.Steps[2].Name)
+	if plan.Steps[3].Name != "run coding agent" {
+		t.Fatalf("step[3].Name = %q", plan.Steps[3].Name)
 	}
-	command := strings.Join(plan.Steps[2].Command, " ")
+	command := strings.Join(plan.Steps[3].Command, " ")
 	if !strings.Contains(command, ".agents/builder/agent.md") {
-		t.Fatalf("agent command = %#v", plan.Steps[2].Command)
+		t.Fatalf("agent command = %#v", plan.Steps[3].Command)
 	}
 	if !strings.Contains(command, "codex exec --full-auto") {
-		t.Fatalf("agent command = %#v", plan.Steps[2].Command)
+		t.Fatalf("agent command = %#v", plan.Steps[3].Command)
 	}
 	if !strings.Contains(command, "Work in a plan-first, small-step style") {
-		t.Fatalf("agent command should include small-step guidance: %#v", plan.Steps[2].Command)
+		t.Fatalf("agent command should include small-step guidance: %#v", plan.Steps[3].Command)
 	}
 	if strings.Contains(command, "G"+"EMINI") || strings.Contains(command, "g"+"emini") {
-		t.Fatalf("agent command should not inject vendor-specific settings: %#v", plan.Steps[2].Command)
+		t.Fatalf("agent command should not inject vendor-specific settings: %#v", plan.Steps[3].Command)
 	}
 }
 
