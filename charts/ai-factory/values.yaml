@@ -118,15 +118,21 @@ openai:
   baseUrl: "https://api.openai.com/v1"
   # Model name
   model: "gpt-4.1"
-  # Temperature
+  # Temperature (0~2). Higher = more creative/divergent; too high makes the
+  # agent deviate from "return only a POSIX script" and triggers retries.
+  # Deterministic/strict tasks: 0.2-0.4; creative tasks: 0.7-1.
   temperature: "1"
-  # Max tokens
+  # Max output tokens PER single model response (not the context window).
+  # Must not exceed the model's real completion limit; too small -> truncation
+  # (finish_reason=length) counts as invalid and wastes final-script rounds.
   maxTokens: "48000"
-  # Max tool rounds
+  # Max model calls in the tool-exploration phase (most expensive stage:
+  # each round = 1 model call + Shell tool execution). Small fixes: 10-20.
   maxToolRounds: "40"
-  # Max final script rounds
+  # Max retries in the final-script phase (each retry = previous output invalid).
   maxFinalScriptRounds: "5"
-  # Max repair rounds
+  # Max repair attempts after the generated script fails. Key fallback for
+  # complex tasks; raise to 5-6 if failures are frequent.
   maxRepairRounds: "3"
   # Total timeout in seconds
   totalTimeoutSeconds: "1800"
