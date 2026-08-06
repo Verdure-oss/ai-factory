@@ -480,3 +480,32 @@ const gitlabIssuePayload = `{
     "labels": [{"title": "ai-factory"}]
   }
 }`
+
+func TestFactoryTaskFromGitHubIssueWebhookWithForkOwner(t *testing.T) {
+	payload := []byte(`{
+		"action": "labeled",
+		"issue": {"number": 7, "title": "Fix bug", "html_url": "https://github.com/matrixhub-ai/matrixhub/issues/7", "labels": [{"name": "ai-factory"}, {"name": "ai-factory-run"}]},
+		"repository": {"full_name": "matrixhub-ai/matrixhub", "html_url": "https://github.com/matrixhub-ai/matrixhub", "clone_url": "https://github.com/matrixhub-ai/matrixhub.git", "default_branch": "main"},
+		"sender": {"login": "someone"}
+	}`)
+	opts := IssueWebhookOptions{
+		Provider:             ProviderGitHub,
+		Repositories:         []string{"matrixhub-ai/matrixhub"},
+		RequiredLabels:       []string{"ai-factory-run"},
+		ChangeRequestEnabled: true,
+		ForkOwner:            "Verdure-oss",
+	}
+	task, err := FactoryTaskFromIssueWebhook(payload, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Spec.ChangeRequest.ForkOwner != "Verdure-oss" {
+		t.Fatalf("got forkOwner %q, want Verdure-oss", task.Spec.ChangeRequest.ForkOwner)
+	}
+	if want := "https://github.com/Verdure-oss/matrixhub.git"; task.Spec.Source.CloneURL != want {
+		t.Fatalf("got cloneURL %q, want %q", task.Spec.Source.CloneURL, want)
+	}
+	if task.Spec.Source.Repository != "matrixhub-ai/matrixhub" {
+		t.Fatalf("repository must stay upstream, got %q", task.Spec.Source.Repository)
+	}
+}

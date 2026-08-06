@@ -15,6 +15,7 @@
 package task
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -41,4 +42,30 @@ func (s SourceSpec) CloneURLOrDefault() (string, error) {
 
 	repository := strings.TrimPrefix(s.Repository, "/")
 	return fmt.Sprintf("https://%s/%s.git", host, repository), nil
+}
+
+// ForkCloneURL derives the clone URL of a same-named fork given the fork owner.
+func (s SourceSpec) ForkCloneURL(forkOwner string) (string, error) {
+	if strings.TrimSpace(forkOwner) == "" {
+		return "", errors.New("forkOwner is required to derive fork clone URL")
+	}
+	repo := strings.TrimPrefix(s.Repository, "/")
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("repository must look like owner/repo, got %q", s.Repository)
+	}
+	host := s.Host
+	switch s.Provider {
+	case ProviderGitHub:
+		if host == "" {
+			host = "github.com"
+		}
+	case ProviderGitLab:
+		if host == "" {
+			host = "gitlab.com"
+		}
+	default:
+		return "", fmt.Errorf("unsupported git provider %q", s.Provider)
+	}
+	return fmt.Sprintf("https://%s/%s/%s.git", host, forkOwner, parts[1]), nil
 }

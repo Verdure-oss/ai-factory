@@ -757,3 +757,49 @@ func TestStatusMergePatch(t *testing.T) {
 		t.Fatalf("condition reason = %q", got.Status.Conditions[0].Reason)
 	}
 }
+
+func TestSourceForkCloneURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       SourceSpec
+		forkOwner string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "github derives fork url",
+			src:       SourceSpec{Provider: ProviderGitHub, Repository: "matrixhub-ai/matrixhub"},
+			forkOwner: "Verdure-oss",
+			want:      "https://github.com/Verdure-oss/matrixhub.git",
+		},
+		{
+			name:      "empty fork owner",
+			src:       SourceSpec{Provider: ProviderGitHub, Repository: "matrixhub-ai/matrixhub"},
+			forkOwner: "",
+			wantErr:   true,
+		},
+		{
+			name:      "malformed repository",
+			src:       SourceSpec{Provider: ProviderGitHub, Repository: "norepo"},
+			forkOwner: "Verdure-oss",
+			wantErr:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.src.ForkCloneURL(tc.forkOwner)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got url %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
