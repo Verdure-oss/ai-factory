@@ -17,8 +17,10 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -265,6 +267,90 @@ func TestCreateChangeRequestReturnsExistingGitLabMergeRequest(t *testing.T) {
 	}
 	if result.URL != "https://gitlab.example.com/platform/ai/ai-factory/-/merge_requests/8" {
 		t.Fatalf("result URL = %q", result.URL)
+	}
+}
+
+func TestBuildGitHubPullRequestWithForkOwner(t *testing.T) {
+	task := &FactoryTask{
+		APIVersion: APIVersion,
+		Kind:       Kind,
+		Metadata:   ObjectMeta{Name: "fork-task"},
+		Spec: FactoryTaskSpec{
+			Source: SourceSpec{Provider: ProviderGitHub, Repository: "matrixhub-ai/matrixhub", BaseRef: "main"},
+			Agent:  AgentSpec{Name: "builder"},
+			Sandbox: SandboxSpec{
+				TemplateRef: "go-dev",
+			},
+			Work: WorkSpec{
+				Commands: []string{"go test ./..."},
+			},
+			ChangeRequest: ChangeRequestSpec{
+				Enabled:    true,
+				ForkOwner:  "Verdure-oss",
+				BranchName: "factory-task/fork-task",
+			},
+		},
+	}
+	req, err := BuildChangeRequest(task, ChangeRequestOptions{Token: "tok"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if want := "Verdure-oss:factory-task/fork-task"; payload["head"] != want {
+		t.Fatalf("got head %q, want %q", payload["head"], want)
+	}
+	if !strings.HasSuffix(req.URL, "/matrixhub-ai/matrixhub/pulls") {
+		t.Fatalf("PR must target upstream repo, got URL %q", req.URL)
+	}
+}
+
+func TestCreateChangeRequestFindsExistingPRByForkOwner(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls") {
+			query := r.URL.Query()
+			if got := query.Get("head"); got != "Verdure-oss:factory-task/fork-task" {
+				t.Fatalf("lookup head %q, want Verdure-oss:factory-task/fork-task", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[{"html_url":"https://github.com/matrixhub-ai/matrixhub/pull/11"}]`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	task := &FactoryTask{
+		APIVersion: APIVersion,
+		Kind:       Kind,
+		Metadata:   ObjectMeta{Name: "fork-task"},
+		Spec: FactoryTaskSpec{
+			Source: SourceSpec{Provider: ProviderGitHub, Repository: "matrixhub-ai/matrixhub", BaseRef: "main"},
+			Agent:  AgentSpec{Name: "builder"},
+			Sandbox: SandboxSpec{
+				TemplateRef: "go-dev",
+			},
+			Work: WorkSpec{
+				Commands: []string{"go test ./..."},
+			},
+			ChangeRequest: ChangeRequestSpec{
+				Enabled:    true,
+				ForkOwner:  "Verdure-oss",
+				BranchName: "factory-task/fork-task",
+			},
+		},
+	}
+	result, err := CreateChangeRequest(context.Background(), task, ChangeRequestOptions{
+		Token:   "tok",
+		APIBase: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.AlreadyExists {
+		t.Fatalf("expected AlreadyExists, got URL %q", result.URL)
 	}
 }
 

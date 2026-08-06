@@ -168,7 +168,11 @@ func findExistingChangeRequest(ctx context.Context, task *FactoryTask, opts Chan
 		}
 		values := url.Values{}
 		values.Set("state", "open")
-		values.Set("head", owner+":"+changeBranch)
+		headOwner := owner
+		if task.Spec.ChangeRequest.ForkOwner != "" {
+			headOwner = task.Spec.ChangeRequest.ForkOwner
+		}
+		values.Set("head", headOwner+":"+changeBranch)
 		lookupURL = fmt.Sprintf("%s/repos/%s/%s/pulls?%s", apiBase, url.PathEscape(owner), url.PathEscape(repo), values.Encode())
 	case ProviderGitLab:
 		apiBase := strings.TrimRight(opts.APIBase, "/")
@@ -263,6 +267,9 @@ func buildGitHubPullRequest(task *FactoryTask, opts ChangeRequestOptions, head, 
 	apiBase := strings.TrimRight(opts.APIBase, "/")
 	if apiBase == "" {
 		apiBase = defaultGitHubAPIBase
+	}
+	if task.Spec.ChangeRequest.ForkOwner != "" {
+		head = task.Spec.ChangeRequest.ForkOwner + ":" + head
 	}
 	payload, err := json.Marshal(map[string]string{
 		"title": title,
