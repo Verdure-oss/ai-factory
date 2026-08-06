@@ -56,6 +56,20 @@
 
 Fine-grained PAT 只能选择用户自己拥有或管理的仓库，无法选择别人的公共仓库（如 `matrixhub-ai/matrixhub`）。因此创建 PR 和写 Issue 的 API 调用会因权限不足而失败。
 
+## 前置条件
+
+- **fork 必须已存在并且同名**：系统不会自动创建 fork。用户必须提前在 GitHub 上把自己账号下的同名仓库 fork 出来（例如 `Verdure-oss/matrixhub`），且 fork 名与上游仓库同名（这里的 `matrixhub`）。
+- 上游仓库、fork 仓库与服务的 `--fork-owner` 必须位于**同一个 Git 主机**（默认 `github.com`）。
+
+## 自动选择（服务端）
+
+服务端在收到 webhook 时会**自动选择**使用哪种流程，无需在 webhook 配置里显式指定：
+
+- 如果事件仓库的 owner **等于** fork owner（也就是 token 拥有者自己拥有的仓库），走**原有直接流程**：直接克隆上游仓库、推送分支、在目标仓库内创建 PR。
+- 否则（事件仓库的 owner 是别人，说明是公共仓库），走 **fork 流程**：根据 `forkOwner` 派生 fork 克隆 URL，注入 `ChangeRequestSpec.ForkOwner` 与 `Source.CloneURL`。
+
+`--fork-owner` 未设置时，服务端会通过 `GITHUB_TOKEN` 调用 `GET /user` **自动探测** token 拥有者的 owner 并缓存（`gitHubLoginCache`）。fork 流程仅在"事件仓库 owner ≠ fork owner"时启用，因此已有仓库的原有流程不受影响。
+
 ## 需要修改的代码
 
 ### 1. `factory/pkg/task/plan.go` — 执行计划生成
@@ -64,81 +78,94 @@ Fine-grained PAT 只能选择用户自己拥有或管理的仓库，无法选择
 - 克隆 URL 来自 `task.Spec.Source.CloneURL`（即目标仓库）
 - 推分支的 remote 是 `origin`（即目标仓库）
 
-**需要修改：**
+**最终实现：**
+
+fork 模式下（`ChangeRequest.ForkOwner != ""`），克隆 URL 是服务端注入的 fork 克隆地址（`Source.CloneURL`），`origin` 即 fork，推送步骤无需改动。在克隆之后、改代码之前新增 `forkBranchSetupSteps`：添加 `upstream` remote、`git fetch upstream <targetBranch>`，并把变更分支基于 `upstream/<targetBranch>` 创建：
 
 ```go
-// 当前：直接克隆目标仓库
-cloneURL = task.Spec.Source.CloneURLOrDefault()  // matrixhub-ai/matrixhub
-
-// 目标：克隆用户的 fork
-// 需要新增配置项，如 spec.source.forkCloneURL 或 spec.changeRequest.pushToFork
-cloneURL = task.Spec.Source.ForkCloneURL  // Verdure-oss/matrixhub
+useFork := task.Spec.ChangeRequest.ForkOwner != ""
+// ...
+if useFork {
+    upstreamURL, err := upstreamRepoURL(task)   // 由 Source.Repository 派生，保持上游
+    plan.Steps = append(plan.Steps, forkBranchSetupSteps(workDir, changeBranch, targetBranch, upstreamURL)...)
+} else {
+    plan.Steps = append(plan.Steps, ExecutionStep{
+        Name:    "create change branch",
+        Command: []string{"git", "-C", workDir, "checkout", "-B", changeBranch},
+    })
+}
 ```
 
-**新增步骤：在克隆之后、改代码之前，添加上游同步步骤：**
+`forkBranchSetupSteps` 生成三个步骤 `add upstream remote` / `fetch upstream` / `checkout upstream branch`（`git checkout -B <changeBranch> upstream/<targetBranch>`）。
+
+### 2. `factory/pkg/task/change_request.go` — PR 创建与查找
+
+**`buildGitHubPullRequest`**：当 `ChangeRequest.ForkOwner != ""` 时，`head` 参数使用 fork owner：
 
 ```go
-// 新增：添加 upstream remote 并同步
-{
-    Name: "add upstream remote",
-    Command: []string{"git", "-C", workDir, "remote", "add", "upstream", upstreamURL},
-},
-{
-    Name: "sync with upstream",
-    Command: []string{"/bin/sh", "-lc", fmt.Sprintf("cd %s && git fetch upstream && git merge upstream/%s --no-edit", workDir, targetBranch)},
-},
+if task.Spec.ChangeRequest.ForkOwner != "" {
+    head = task.Spec.ChangeRequest.ForkOwner + ":" + head  // 例如 "Verdure-oss:fix/xxx"
+}
 ```
 
-### 2. `factory/pkg/task/change_request.go` — PR 创建
+**`findExistingChangeRequest`**：查找已有 PR 时，`head` 同样使用 fork owner：
 
-**当前逻辑（`buildGitHubPullRequest`）：**
 ```go
-// head 参数使用 task.Spec.Source.Repository（目标仓库）
-"head": head,  // 例如 "matrixhub-ai:fix/xxx"
+headOwner := owner
+if task.Spec.ChangeRequest.ForkOwner != "" {
+    headOwner = task.Spec.ChangeRequest.ForkOwner
+}
+values.Set("head", headOwner+":"+changeBranch)
 ```
 
-**需要修改：**
-```go
-// head 参数需要使用 fork 仓库
-"head": forkOwner + ":" + changeBranch,  // 例如 "Verdure-oss:fix/xxx"
-```
-
-**当前逻辑（`findExistingChangeRequest`）：**
-```go
-// 查找已有 PR 时，head 用的是目标仓库的 owner
-values.Set("head", owner+":"+changeBranch)
-```
-
-**需要修改：**
-```go
-// 查找已有 PR 时，head 需要用 fork 的 owner
-values.Set("head", forkOwner+":"+changeBranch)
-```
+`Source.Repository` 始终保留上游仓库（用于 PR 目标 base 与 Issue 操作）。
 
 ### 3. `factory/pkg/task/task.go` — FactoryTask CRD 定义
 
-需要在 `SourceSpec` 或 `ChangeRequestSpec` 中新增配置字段：
+在 `ChangeRequestSpec` 中新增单一字段 `ForkOwner`（**没有** `forkCloneURL` 字段，fork 克隆 URL 由 `ForkOwner` + 源仓库派生）：
 
 ```go
-type SourceSpec struct {
-    // ... 现有字段 ...
-
-    // ForkCloneURL 是用于克隆的 fork 仓库地址（可选）。
-    // 设置后，系统会克隆此 URL 而非 Repository，并自动添加 upstream remote 同步。
-    ForkCloneURL string `yaml:"forkCloneURL,omitempty"`
-}
-
-// 或者在 ChangeRequestSpec 中：
 type ChangeRequestSpec struct {
     // ... 现有字段 ...
 
-    // ForkOwner 是 fork 仓库的 owner，用于 PR 的 head 参数。
+    // ForkOwner 是 fork 仓库的 owner，用于 PR 的 head 参数与 fork 克隆 URL 派生。
     // 设置后，分支推送到 fork，PR 的 head 使用 ForkOwner:BranchName。
     ForkOwner string `yaml:"forkOwner,omitempty"`
 }
 ```
 
-### 4. `factory/pkg/task/reporting.go` — Issue 评论
+校验（`Validate`）：
+- `forkOwner` 仅支持 github provider，与 `gitlab` 一起使用时报错。
+- `forkOwner` 必须是合法的 GitHub owner 名（不允许包含 `/`、`:`、空格、制表符）。
+
+### 4. Webhook 注入与克隆 URL 派生
+
+`factory/pkg/task/webhook.go` 在生成 FactoryTask 时注入 fork 配置：
+
+```go
+if opts.ForkOwner != "" {
+    task.Spec.ChangeRequest.ForkOwner = opts.ForkOwner
+    forkURL, err := task.Spec.Source.ForkCloneURL(opts.ForkOwner)  // 派生 fork 克隆 URL
+    task.Spec.Source.CloneURL = forkURL
+}
+```
+
+`SourceSpec.ForkCloneURL(forkOwner)`（`provider.go`）在同一主机上把 `Repository` 的 owner 替换为 fork owner，派生同名的 fork 克隆 URL（例如 `Verdure-oss/matrixhub` → `https://github.com/Verdure-oss/matrixhub.git`）。
+
+### 5. `factory/cmd/factory/server/server.go` — 服务端自动选择与 flag
+
+新增两个 flag：
+
+```go
+Cmd.Flags().StringVar(&opts.ForkOwner, "fork-owner", "",
+    "GitHub owner of the fork used for change requests; defaults to the authenticated token owner")
+Cmd.Flags().StringArrayVar(&opts.Repositories, "repository", nil,
+    "repository allowed to trigger FactoryTasks; can be repeated")
+```
+
+`shouldUseFork(eventOwner, forkOwner)` 决定是否走 fork 流程：当事件仓库 owner ≠ fork owner 时返回 true。fork owner 通过 `resolveForkConfig` 解析：`--fork-owner` 未设置时，用 `GITHUB_TOKEN` 调 `GET /user` 自动探测并缓存（`gitHubLoginCache`）。
+
+### 6. `factory/pkg/task/reporting.go` — Issue 评论
 
 当前评论功能已经支持向任意仓库的 Issue 发评论（通过解析 Issue URL），无需修改。只需确保 token 对目标仓库有 `public_repo` 权限即可。
 
@@ -153,12 +180,10 @@ spec:
   source:
     provider: github
     repository: matrixhub-ai/matrixhub     # 上游仓库（用于 PR 目标和 Issue 操作）
-    forkCloneURL: https://github.com/Verdure-oss/matrixhub.git  # fork 仓库（用于克隆和推送）
     baseRef: main
-    cloneURL: https://github.com/Verdure-oss/matrixhub.git  # 实际克隆地址
   changeRequest:
     enabled: true
-    forkOwner: Verdure-oss                 # fork 的 owner（用于 PR head 参数）
+    forkOwner: Verdure-oss                 # fork 的 owner（用于 PR head 参数与 fork 克隆 URL 派生）
     branchPrefix: factory-task
     targetBranch: main
   agent:
@@ -173,11 +198,12 @@ spec:
 
 | 文件 | 修改内容 |
 |---|---|
-| `factory/pkg/task/plan.go` | 新增 fork 克隆 URL 支持、upstream 同步步骤 |
+| `factory/pkg/task/plan.go` | fork 模式下基于 `upstream/<targetBranch>` 创建变更分支（`forkBranchSetupSteps`） |
 | `factory/pkg/task/change_request.go` | PR head 参数使用 fork owner、查找已有 PR 时用 fork owner |
-| `factory/pkg/task/task.go` | FactoryTask CRD 新增 fork 相关字段 |
-| `factory/pkg/task/webhook.go` | 可能需要在生成 FactoryTask 时填入 fork 信息 |
-| `factory/cmd/factory/server/server.go` | webhook handler 中传递 fork 配置 |
+| `factory/pkg/task/task.go` | `ChangeRequestSpec` 新增 `ForkOwner` 字段 + github-only 校验 |
+| `factory/pkg/task/provider.go` | `SourceSpec.ForkCloneURL` 根据 `ForkOwner` 派生同名的 fork 克隆 URL |
+| `factory/pkg/task/webhook.go` | 生成 FactoryTask 时注入 `ForkOwner` 与 fork 克隆 URL |
+| `factory/cmd/factory/server/server.go` | 新增 `--fork-owner` / `--repository` flag、`GET /user` 自动探测 + 自动选择 fork/直接流程 |
 | `factory/cmd/factory/server/controller.go` | 无需修改（执行计划由 plan.go 生成） |
 
 ## Webhook 配置
