@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	taskpkg "github.com/ai-on-gke/ai-factory/factory/pkg/task"
@@ -257,6 +258,57 @@ func (c *GitHubClient) setHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
+}
+
+// AuthenticatedLogin returns the login of the account owning the configured token.
+func (c *GitHubClient) AuthenticatedLogin(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+"/user", nil)
+	if err != nil {
+		return "", fmt.Errorf("build /user request: %w", err)
+	}
+	c.setHeaders(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("get /user: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("get /user: unexpected status %s", resp.Status)
+	}
+	var payload struct {
+		Login string `json:"login"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode /user response: %w", err)
+	}
+	return payload.Login, nil
+}
+
+// gitHubLoginCache caches the authenticated login per token so fork-owner
+// detection does not hit the API on every webhook.
+type gitHubLoginCache struct {
+	mu      sync.Mutex
+	byToken map[string]string
+}
+
+var gitHubLoginCacheInstance = &gitHubLoginCache{byToken: make(map[string]string)}
+
+func (c *gitHubLoginCache) resolve(ctx context.Context, gh *GitHubClient) (string, error) {
+	key := gh.token
+	c.mu.Lock()
+	if v, ok := c.byToken[key]; ok {
+		c.mu.Unlock()
+		return v, nil
+	}
+	c.mu.Unlock()
+	login, err := gh.AuthenticatedLogin(ctx)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.byToken[key] = login
+	c.mu.Unlock()
+	return login, nil
 }
 
 // ParseRepository extracts owner/repo from a full name like "owner/repo".

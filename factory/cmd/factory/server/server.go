@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -47,6 +48,8 @@ type Options struct {
 	TaskTimeout         time.Duration
 	EnableChangeRequest bool
 	ReportEnabled       bool
+	ForkOwner           string
+	Repositories        []string
 }
 
 // Cmd represents the server command.
@@ -76,6 +79,8 @@ func init() {
 	Cmd.Flags().StringArrayVar(&opts.ValidationCommands, "validation-command", nil, "validation command for run mode (can be repeated)")
 	Cmd.Flags().BoolVar(&opts.EnableChangeRequest, "change-request", true, "enable PR/MR creation")
 	Cmd.Flags().BoolVar(&opts.ReportEnabled, "report", true, "enable reporting comments")
+	Cmd.Flags().StringVar(&opts.ForkOwner, "fork-owner", "", "GitHub owner of the fork used for change requests; defaults to the authenticated token owner")
+	Cmd.Flags().StringArrayVar(&opts.Repositories, "repository", nil, "repository allowed to trigger FactoryTasks; can be repeated")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -188,7 +193,14 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 		}
 
 		// Create FactoryTask from webhook (smoke/run mode handled by FactoryTaskFromIssueWebhook)
-		task, err := taskpkg.FactoryTaskFromIssueWebhook(body, webhookOptions(provider))
+		forkOwner, err := resolveForkConfig(provider, event.Repository)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		opts := webhookOptions(provider)
+		opts.ForkOwner = forkOwner
+		task, err := taskpkg.FactoryTaskFromIssueWebhook(body, opts)
 		if err != nil {
 			if ignored, ok := err.(*taskpkg.IgnoredIssueWebhookError); ok {
 				w.Header().Set("Content-Type", "application/json")
@@ -293,8 +305,51 @@ func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
 		TriggerActions:       []string{"labeled"},
 		RequiredLabels:       []string{"ai-factory-run", "ai-factory-smoke"},
 		RequireAllOf:         []string{"ai-factory"},
+		Repositories:         opts.Repositories,
 		ChangeRequestEnabled: opts.EnableChangeRequest,
 	}
+}
+
+// shouldUseFork reports whether an event targeting eventOwner should use the
+// fork flow: only when a fork owner exists and the target repo is not owned by it.
+func shouldUseFork(eventOwner, forkOwner string) bool {
+	return eventOwner != "" && forkOwner != "" && eventOwner != forkOwner
+}
+
+// resolveForkConfig decides the fork owner for an event. It returns "" to keep
+// the existing direct flow (used when the event repo is owned by the fork owner).
+func resolveForkConfig(provider, eventRepository string) (string, error) {
+	if provider != taskpkg.ProviderGitHub {
+		return "", nil
+	}
+	forkOwner := opts.ForkOwner
+	if forkOwner == "" {
+		gh := NewGitHubClient()
+		if !gh.HasToken() {
+			return "", nil
+		}
+		login, err := gitHubLoginCacheInstance.resolve(context.Background(), gh)
+		if err != nil {
+			return "", fmt.Errorf("detect fork owner from token: %w", err)
+		}
+		if login == "" {
+			return "", errors.New("detect fork owner from token: response missing login")
+		}
+		forkOwner = login
+	}
+	if !shouldUseFork(repoOwner(eventRepository), forkOwner) {
+		return "", nil
+	}
+	return forkOwner, nil
+}
+
+// repoOwner returns the owner portion of an "owner/repo" string, or "" if invalid.
+func repoOwner(repository string) string {
+	parts := strings.SplitN(strings.TrimPrefix(repository, "/"), "/", 2)
+	if len(parts) == 2 && parts[0] != "" {
+		return parts[0]
+	}
+	return ""
 }
 
 func verifyWebhook(provider string, body []byte, req *http.Request) error {

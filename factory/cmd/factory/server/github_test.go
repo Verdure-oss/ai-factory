@@ -259,6 +259,68 @@ func TestFullLabelTransitionFlow(t *testing.T) {
 	}
 }
 
+func TestShouldUseFork(t *testing.T) {
+	tests := []struct {
+		eventOwner string
+		forkOwner  string
+		want       bool
+	}{
+		{"matrixhub-ai", "Verdure-oss", true}, // upstream public repo -> fork
+		{"Verdure-oss", "Verdure-oss", false}, // own repo -> direct flow
+		{"", "Verdure-oss", false},            // no event owner -> no fork
+		{"matrixhub-ai", "", false},           // no fork owner -> no fork
+	}
+	for _, tc := range tests {
+		if got := shouldUseFork(tc.eventOwner, tc.forkOwner); got != tc.want {
+			t.Fatalf("shouldUseFork(%q, %q) = %v, want %v", tc.eventOwner, tc.forkOwner, got, tc.want)
+		}
+	}
+}
+
+func TestGitHubClientAuthenticatedLogin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/user") {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"login":"Verdure-oss"}`)
+	}))
+	defer server.Close()
+
+	gh := &GitHubClient{token: "tok", apiBase: strings.TrimRight(server.URL, "/"), client: server.Client()}
+	login, err := gh.AuthenticatedLogin(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if login != "Verdure-oss" {
+		t.Fatalf("got login %q, want Verdure-oss", login)
+	}
+}
+
+func TestGitHubLoginCacheResolve(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, `{"login":"Verdure-oss"}`)
+	}))
+	defer server.Close()
+
+	cache := &gitHubLoginCache{byToken: make(map[string]string)}
+	gh := &GitHubClient{token: "tok", apiBase: strings.TrimRight(server.URL, "/"), client: server.Client()}
+	first, err := cache.resolve(context.Background(), gh)
+	if err != nil || first != "Verdure-oss" {
+		t.Fatalf("first resolve failed: login=%q err=%v", first, err)
+	}
+	second, err := cache.resolve(context.Background(), gh)
+	if err != nil || second != "Verdure-oss" {
+		t.Fatalf("second resolve failed: login=%q err=%v", second, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 API call, got %d", calls)
+	}
+}
+
 func TestIsAlreadyExistsError(t *testing.T) {
 	tests := []struct {
 		name string
