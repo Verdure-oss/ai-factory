@@ -118,6 +118,7 @@ type ChangeRequestSpec struct {
 	RemoteName    string `yaml:"remoteName,omitempty"`
 	AuthTokenEnv  string `yaml:"authTokenEnv,omitempty"`
 	AuthUsername  string `yaml:"authUsername,omitempty"`
+	ForkOwner     string `yaml:"forkOwner,omitempty"`
 }
 
 // ReportingSpec describes how execution results should be reported.
@@ -201,6 +202,14 @@ func (s FactoryTaskSpec) validate() []error {
 		errs = append(errs, errors.New("spec.work.instructions or spec.work.commands is required"))
 	}
 	errs = append(errs, s.ChangeRequest.validate()...)
+	if s.ChangeRequest.ForkOwner != "" {
+		if s.Source.Provider == ProviderGitLab {
+			errs = append(errs, errors.New("spec.changeRequest.forkOwner is only supported for the github provider"))
+		}
+		if strings.ContainsAny(s.ChangeRequest.ForkOwner, "/: \t") {
+			errs = append(errs, errors.New("spec.changeRequest.forkOwner must be a GitHub owner name"))
+		}
+	}
 	if s.Reporting.TargetURL != "" {
 		if _, err := url.ParseRequestURI(s.Reporting.TargetURL); err != nil {
 			errs = append(errs, fmt.Errorf("spec.reporting.targetURL must be a valid URL: %w", err))

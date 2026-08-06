@@ -667,6 +667,61 @@ spec:
 	}
 }
 
+func TestParseRejectsForkOwnerWithGitLab(t *testing.T) {
+	data := []byte(`apiVersion: factory.ai.gke.io/v1alpha1
+kind: FactoryTask
+metadata:
+  name: fork-gitlab
+spec:
+  source:
+    provider: gitlab
+    host: gitlab.com
+    repository: matrixhub-ai/matrixhub
+    baseRef: main
+  agent:
+    name: builder
+  sandbox:
+    templateRef: go-dev
+  work:
+    instructions: do something
+  changeRequest:
+    enabled: true
+    forkOwner: Verdure-oss
+`)
+	if _, err := Parse(data); err == nil {
+		t.Fatal("expected error for forkOwner with gitlab provider, got nil")
+	} else if !strings.Contains(err.Error(), "only supported for the github provider") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseRejectsForkOwnerWithSlash(t *testing.T) {
+	data := []byte(`apiVersion: factory.ai.gke.io/v1alpha1
+kind: FactoryTask
+metadata:
+  name: fork-slash
+spec:
+  source:
+    provider: github
+    repository: matrixhub-ai/matrixhub
+    baseRef: main
+  agent:
+    name: builder
+  sandbox:
+    templateRef: go-dev
+  work:
+    instructions: do something
+  changeRequest:
+    enabled: true
+    forkOwner: Bad/Owner
+`)
+	if _, err := Parse(data); err == nil {
+		t.Fatal("expected error for forkOwner containing '/', got nil")
+	} else if !strings.Contains(err.Error(), "must be a GitHub owner name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestStatusMergePatch(t *testing.T) {
 	patch, err := StatusMergePatch(StatusPatchOptions{
 		Phase:            PhaseRunning,

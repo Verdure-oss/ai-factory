@@ -147,6 +147,8 @@ spec:
                     type: string
                   authUsername:
                     type: string
+                  forkOwner:
+                    type: string
               reporting:
                 type: object
                 properties:
