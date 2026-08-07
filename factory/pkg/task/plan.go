@@ -77,6 +77,16 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 
 	useFork := task.Spec.ChangeRequest.ForkOwner != ""
 
+	// Use a shallow clone (--depth 1) to keep the initial transfer small. Full
+	// history is not needed for the change-request workflow, and a shallow clone
+	// avoids timeouts when cloning through a slow/throttled git proxy. In
+	// non-fork mode the clone targets the base ref branch directly so the
+	// subsequent base-ref checkout has the branch available.
+	cloneArgs := "--depth 1"
+	if !useFork && strings.TrimSpace(task.Spec.Source.BaseRef) != "" {
+		cloneArgs += " --branch " + shellQuote(task.Spec.Source.BaseRef)
+	}
+
 	plan := &ExecutionPlan{
 		TaskName:        task.Metadata.Name,
 		Provider:        task.Spec.Source.Provider,
@@ -101,7 +111,7 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 			},
 			{
 				Name:    "clone repository",
-				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("git -c http.version=HTTP/1.1 clone %s %s", shellQuote(cloneURL), shellQuote(workDir))},
+				Command: []string{"/bin/sh", "-lc", fmt.Sprintf("git -c http.version=HTTP/1.1 clone %s %s %s", cloneArgs, shellQuote(cloneURL), shellQuote(workDir))},
 			},
 		},
 	}
@@ -192,7 +202,7 @@ func upstreamRepoURL(task *FactoryTask) (string, error) {
 func forkBranchSetupSteps(workDir, changeBranch, targetBranch, upstreamURL string) []ExecutionStep {
 	addUpstream := fmt.Sprintf("git -C %s remote add upstream %s 2>/dev/null || git -C %s remote set-url upstream %s",
 		shellQuote(workDir), shellQuote(upstreamURL), shellQuote(workDir), shellQuote(upstreamURL))
-	fetchUpstream := fmt.Sprintf("git -C %s fetch upstream %s", shellQuote(workDir), shellQuote(targetBranch))
+	fetchUpstream := fmt.Sprintf("git -C %s fetch --depth 1 upstream %s", shellQuote(workDir), shellQuote(targetBranch))
 	return []ExecutionStep{
 		{
 			Name:    "add upstream remote",

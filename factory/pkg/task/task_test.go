@@ -256,6 +256,10 @@ spec:
 	if !strings.Contains(authCommand, "GITHUB_TOKEN is required in the sandbox environment for git clone/push") {
 		t.Fatalf("auth command = %#v", plan.Steps[0].Command)
 	}
+	cloneCommand := strings.Join(plan.Steps[3].Command, " ")
+	if !strings.Contains(cloneCommand, "clone --depth 1 --branch 'main'") {
+		t.Fatalf("clone command should be a shallow clone of the base ref branch, got %#v", plan.Steps[3].Command)
+	}
 	runCommand := strings.Join(plan.Steps[6].Command, " ")
 	if !strings.Contains(runCommand, "export PATH=/usr/local/go/bin:$PATH") {
 		t.Fatalf("run command should include sandbox toolchain PATH, got %#v", plan.Steps[6].Command)
@@ -328,6 +332,12 @@ func TestBuildExecutionPlanWithForkOwner(t *testing.T) {
 			cmd := strings.Join(step.Command, " ")
 			if !strings.Contains(cmd, "upstream/main") || !strings.Contains(cmd, plan.ChangeBranch) {
 				t.Fatalf("checkout upstream branch command %q must reference upstream/main and %q", cmd, plan.ChangeBranch)
+			}
+		}
+		if step.Name == "fetch upstream" {
+			cmd := strings.Join(step.Command, " ")
+			if !strings.Contains(cmd, "fetch --depth 1 upstream") {
+				t.Fatalf("fetch upstream command should be a shallow fetch, got %#v", step.Command)
 			}
 		}
 	}
