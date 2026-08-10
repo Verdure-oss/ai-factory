@@ -31,6 +31,11 @@ from agent_config import (
     InvalidAgentConfiguration,
     load_config,
 )
+from agent_images import (
+    build_user_content,
+    download_to_data_url,
+    extract_image_urls,
+)
 from script_validation import (
     SCRIPT_HEADER,
     RepairResponseError,
@@ -286,6 +291,12 @@ if not prompt.strip():
     print("FactoryTask prompt on stdin is empty", file=sys.stderr)
     sys.exit(2)
 
+# Extract image URLs from the prompt and attach them as image_url content
+# blocks so a multimodal model can read issue screenshots. Without images the
+# user content stays a plain string, preserving the original text-only path.
+image_urls = extract_image_urls(prompt)
+user_content = build_user_content(prompt, image_urls)
+
 system_prompt = """You are running inside an ai-factory sandbox.
 Return only a POSIX shell script. Do not wrap it in Markdown.
 Your response must start with a shell command or a shebang.
@@ -303,7 +314,7 @@ ai-factory will run validation, commit, push, and create the change request afte
 """
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": prompt},
+    {"role": "user", "content": user_content},
 ]
 tools = [
     {
@@ -381,6 +392,10 @@ tool_budget = PhaseRoundBudget(
     max_tool_rounds,
     "ToolRoundsExhausted",
 )
+# Bounded single retry: if the first request fails and the prompt has images,
+# embed any images that download in the sandbox as base64 data URLs and retry
+# once, in case the provider cannot reach the original image URL.
+base64_fallback_tried = False
 while not script:
     try:
         tool_round = tool_budget.next_round()
@@ -391,18 +406,46 @@ while not script:
         )
         break
 
-    payload = request_model(
-        {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "tools": tools,
-            "tool_choice": "auto",
-        },
-        "tool-exploration",
-        exploration_request_timeout_seconds,
-    )
+    request = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+    try:
+        payload = request_model(
+            request,
+            "tool-exploration",
+            exploration_request_timeout_seconds,
+            exit_on_error=False,
+        )
+    except AgentBudgetError:
+        if image_urls and not base64_fallback_tried:
+            base64_fallback_tried = True
+            embedded = {url: download_to_data_url(url) for url in image_urls}
+            if any(embedded.values()):
+                messages[1] = {
+                    "role": "user",
+                    "content": build_user_content(prompt, image_urls, embedded),
+                }
+                print(
+                    "OpenAI-compatible request failed with image URLs; "
+                    "retrying with base64-embedded images",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "OpenAI-compatible request failed with image URLs; "
+                    "could not download images, retrying original request",
+                    file=sys.stderr,
+                )
+        payload = request_model(
+            request,
+            "tool-exploration",
+            exploration_request_timeout_seconds,
+        )
     choice, message, content, tool_calls = parse_model_message(
         payload,
         "tool-exploration",

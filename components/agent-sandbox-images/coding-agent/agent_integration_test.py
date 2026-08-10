@@ -81,10 +81,10 @@ def completion(content, finish_reason="stop", tool_calls=None, reasoning_content
 
 
 class AgentIntegrationTest(unittest.TestCase):
-    def run_agent(self, server, **overrides):
+    def run_agent(self, server, prompt="Make the requested focused change.", **overrides):
         with tempfile.TemporaryDirectory() as temp_dir:
             prompt_path = Path(temp_dir) / "prompt.txt"
-            prompt_path.write_text("Make the requested focused change.", encoding="utf-8")
+            prompt_path.write_text(prompt, encoding="utf-8")
             env = os.environ.copy()
             for name in (
                 "HTTP_PROXY",
@@ -134,6 +134,43 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertIn("agent-success", completed.stdout)
         self.assertEqual(len(server.requests), 1)
         self.assertEqual(server.requests[0]["tool_choice"], "auto")
+
+    def test_prompt_image_urls_become_image_content_blocks(self):
+        prompt = (
+            "Fix the login page.\n\n"
+            '![screenshot](https://example.com/a.png)\n'
+            '<img src="https://github.com/user-attachments/assets/abc123" />\n\n'
+            "Make the fix."
+        )
+        with completion_server([completion("printf 'vision-success\\n'")]) as server:
+            completed = self.run_agent(server, prompt=prompt)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("vision-success", completed.stdout)
+        user_message = server.requests[0]["messages"][1]
+        self.assertEqual(user_message["role"], "user")
+        content = user_message["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "text")
+        image_urls = [
+            block["image_url"]["url"] for block in content if block["type"] == "image_url"
+        ]
+        self.assertEqual(
+            image_urls,
+            [
+                "https://example.com/a.png",
+                "https://github.com/user-attachments/assets/abc123",
+            ],
+        )
+
+    def test_prompt_without_images_keeps_plain_string_content(self):
+        with completion_server([completion("printf 'plain-success\\n'")]) as server:
+            completed = self.run_agent(server, prompt="No images here.")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        user_message = server.requests[0]["messages"][1]
+        self.assertIsInstance(user_message["content"], str)
+        self.assertEqual(user_message["content"], "No images here.")
 
     def test_standalone_bash_fence_is_unwrapped_and_runs_from_repo_root(self):
         script = "\n".join(
