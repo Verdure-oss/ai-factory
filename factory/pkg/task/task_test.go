@@ -498,8 +498,12 @@ func TestCommitChangesScriptRemovesPythonBuildArtifacts(t *testing.T) {
 		}
 	}
 
+	shell, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available; commit script requires a POSIX shell")
+	}
 	command := exec.Command(
-		"/bin/sh",
+		shell,
 		"-lc",
 		commitChangesScript(repository, "test cleanup", "ai-factory", "ai-factory@example.invalid"),
 	)

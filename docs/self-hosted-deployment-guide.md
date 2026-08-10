@@ -393,6 +393,24 @@ kubectl get sandboxclaims -n ai-factory \
 
 ---
 
+## 卸载服务
+
+```bash
+# 卸载 Helm release(保留 namespace 和 CRD)
+helm uninstall ai-factory -n ai-factory
+
+# 删除 namespace(移除全部资源)
+kubectl delete namespace ai-factory
+
+# 如需清理 FactoryTask CRD
+kubectl delete crd factorytasks.factory.ai.gke.io
+```
+
+> agent-sandbox 的 CRD(SandboxClaim / SandboxTemplate / SandboxWarmPool,`agents.x-k8s.io` 组)
+> 由 `components/agent-sandbox/install` 安装,如需一并清除请按该脚本对应的 agent-sandbox 文档操作。
+
+---
+
 ## 下一步
 
 - 遇到问题？查看 [故障排查指南](self-hosted-troubleshooting.md)

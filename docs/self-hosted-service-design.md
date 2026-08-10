@@ -2,6 +2,10 @@
 
 > 本文档记录将 ai-factory 从 GitHub Actions 工作流迁移到 K8s 自托管服务的架构设计。
 > 基于 2026-07-28 的讨论整理，供后续开发参考。
+>
+> **实现说明（2026-08）**：本文是历史设计记录。其中规划的 `k8s/` 原始清单最终以
+> **Helm Chart（`charts/ai-factory/`）**形式落地，`k8s/` 目录已废弃并移除。
+> 部署请使用 `scripts/package.sh` + `scripts/deploy-remote.sh`。
 
 ## 1. 背景与目标
 
