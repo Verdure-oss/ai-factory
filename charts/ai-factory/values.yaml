@@ -102,6 +102,16 @@ webhook:
 github:
   # GitHub token (set via --set or in secret)
   token: ""
+  # Fork PR workflow: owner of the fork used to create PRs against an upstream
+  # public repository. When set, ai-factory clones the fork and opens the PR
+  # from fork:branch -> upstream:base. If empty, the authenticated token owner
+  # is auto-detected. Disable by setting to "" (or omit) to keep direct flow.
+  # Only relevant for the GitHub provider.
+  forkOwner: ""
+  # Optional allow-list of repositories (owner/repo) allowed to trigger
+  # FactoryTasks via webhook. Empty = no restriction (all repos allowed).
+  # Can be repeated; matches against the event's owner/repo.
+  repositoryAllowList: []
 
 # GitLab configuration
 gitlab:

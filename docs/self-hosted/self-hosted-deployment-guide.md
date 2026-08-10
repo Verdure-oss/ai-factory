@@ -230,6 +230,38 @@ coding-agent-warm-pool  2/2     30s
 |--------|------|
 | AI_FACTORY_GIT_PROXY | Git 克隆代理（可选） |
 
+### Fork 工作流配置（可选，仅 GitHub）
+
+向公共上游仓库（无写权限）提 PR 时使用。配置后 ai-factory 会克隆你的 fork、同步上游，然后从 `fork:branch` 向上游 `base` 建 PR。
+
+| 配置项 | 说明 | 对应 server flag |
+|--------|------|------------------|
+| `GITHUB_FORK_OWNER` | Fork 的所有者（GitHub 用户名）。留空则自动从 token 反查登录名；当事件仓库 owner 与 fork owner 相同时自动保持直连流程 | `--fork-owner` |
+| `GITHUB_REPOSITORY_ALLOWLIST` | 仓库 allow-list（逗号分隔 `owner/repo`），只允许这些仓库触发 FactoryTask。留空 = 不限制 | `--repository` |
+
+> 这两个配置在 `deploy-remote.sh` 中交互式收集，也可在 `ai-factory.env` 里预设。部署后如需修改，更新 `ai-factory.env` 并重新运行 `deploy-remote.sh`（或 `helm upgrade`）生效。
+
+### Server 启动参数（CLI Flags）
+
+由 Helm chart 根据 `values.yaml` 注入，一般无需手动修改。默认值如下：
+
+| Flag | 默认值 | 说明 |
+|------|--------|------|
+| `--addr` | `:8080` | Webhook 监听地址 |
+| `--namespace` | `default` | FactoryTask 命名空间 |
+| `--agent` | `builder` | 生成的 FactoryTask 使用的 agent 名 |
+| `--agent-command` | `ai-factory-agent openai-compatible` | run 模式的 agent 命令 |
+| `--smoke-agent-command` | `cat >/tmp/ai-factory-agent-prompt.txt` | smoke 模式的 agent 命令 |
+| `--validation-command` | (空) | run 模式的验证命令,可重复 |
+| `--smoke-command` | (见 values) | smoke 模式的验证命令,可重复 |
+| `--sandbox-template` | `go-dev` | 沙箱模板引用 |
+| `--watch-interval` | `15s` | 控制器轮询间隔 |
+| `--task-timeout` | `30m` | 每个 SandboxClaim 就绪超时 |
+| `--change-request` | `true` | 是否创建 PR/MR |
+| `--report` | `true` | 是否发 Issue 评论 |
+| `--fork-owner` | (空) | Fork 所有者,用于公共仓库 fork PR 流程 |
+| `--repository` | (空) | 允许触发的仓库 allow-list,可重复 |
+
 ---
 
 ## 验证部署
@@ -352,6 +384,60 @@ kubectl port-forward --address=0.0.0.0 svc/ai-factory-server 8080:80 -n ai-facto
    - Issue 标签变化：`ai-factory-run` → `ai-factory-running` → `ai-factory-done`
    - 服务日志：`kubectl logs -f deployment/ai-factory-server -n ai-factory`
    - FactoryTask：`kubectl get factorytasks -n ai-factory`
+
+---
+
+## Fork PR 工作流（向公共仓库提 PR）
+
+> 适用于目标仓库是**公共仓库**、你没有写权限、需通过 fork 贡献代码的场景。
+> 例如向 `matrixhub-ai/matrixhub` 提 PR,你的 fork 是 `Verdure-oss/matrixhub`。
+
+### 原理
+
+```
+1. 接收 matrixhub-ai/matrixhub 的 Issue 事件（webhook）
+2. 克隆 Verdure-oss/matrixhub（你的 fork）
+3. 添加 upstream remote（matrixhub-ai/matrixhub）
+4. git fetch upstream && 基于上游最新分支建分支
+5. 改代码、提交
+6. 推分支到 Verdure-oss/matrixhub           ← 你有权限
+7. 创建 PR: Verdure-oss:branch → matrixhub-ai/matrixhub:base
+```
+
+### 前提条件
+
+- 一个 **Classic PAT(`public_repo` scope)** 即可覆盖所有操作：fork 仓库、推分支到自己的 fork、向公共仓库建 PR、写 Issue/评论。
+- 目标仓库已配置 webhook 指向你的服务。
+
+### 配置步骤
+
+1. 在 `ai-factory.env` 中设置 fork owner（可选，留空则自动从 token 反查）：
+
+   ```
+   GITHUB_FORK_OWNER=Verdure-oss
+   ```
+
+2. （可选）配置仓库 allow-list,只允许特定仓库触发：
+
+   ```
+   GITHUB_REPOSITORY_ALLOWLIST=matrixhub-ai/matrixhub,other-owner/repo
+   ```
+
+3. 重新部署使配置生效：
+
+   ```bash
+   ./deploy-remote.sh
+   ```
+
+### 触发方式
+
+和普通工作流一样：给目标仓库的 Issue 打 `ai-factory-run` 标签。ai-factory 检测到事件仓库 owner(如 `matrixhub-ai`)≠ fork owner(`Verdure-oss`)时,自动走 fork 流程。
+
+### 注意事项
+
+- **自动检测**:不显式设置 `GITHUB_FORK_OWNER` 时,服务会调用 GitHub API 从 token 反查登录名作为 fork owner。
+- **直连保持**:当事件仓库 owner 恰好等于 fork owner 时,自动保持直连流程（不用 fork）。
+- **allow-list 是安全加固**:设置后,只有白名单内的仓库能触发 FactoryTask,防止任意仓库滥用你的服务。
 
 ---
 

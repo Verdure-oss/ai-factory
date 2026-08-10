@@ -17,10 +17,15 @@
 ### 完整更新流程
 
 ```
-代码修改 → 打包 → 传输 → 导入镜像 → 更新 Helm → 验证
+代码修改 → 打包 → 传输 → 运行升级脚本 → 验证
 ```
 
-### 1. 打包新版本
+### 方式 1: 使用升级脚本（`upgrade.sh`，推荐）
+
+> `scripts/upgrade.sh` 封装了完整的升级步骤：导入镜像、加载配置、升级 Helm chart、
+> 更新 agent-sandbox 控制器、清理旧 SandboxClaim、重建 warm pool。
+
+#### 1. 打包新版本
 
 ```bash
 cd ai-factory
@@ -28,22 +33,71 @@ cd ai-factory
 # 拉取最新代码
 git pull
 
-# 运行打包脚本
+# 运行打包脚本（构建镜像并导出到 dist/）
 ./scripts/package.sh
 ```
 
-### 2. 传输到目标机器
+#### 2. 传输到目标机器
 
 ```bash
 # 方式 1: rsync（推荐）
-rsync -avz --progress dist/ user@your-vm:/path/to/dist/
+rsync -avz --progress dist/ user@your-vm:/path/to/ai-factory/
 
 # 方式 2: 压缩后传输
 tar czf dist.tar.gz dist/
 scp dist.tar.gz user@your-vm:/path/to/
+ssh user@your-vm "cd /path/to && tar xzf dist.tar.gz"
 ```
 
-### 3. 导入新镜像
+> **注意**：`upgrade.sh` 默认从仓库根目录的 `dist/` 读取镜像，并直接使用源码目录下的
+> `charts/ai-factory/` 作为 chart。因此目标机器上需要**完整的仓库源码**（含 `dist/`），
+> 而不只是 `dist/` 目录本身。
+
+#### 3. 运行升级脚本
+
+在目标机器上，从仓库根目录执行：
+
+```bash
+cd /path/to/ai-factory
+./scripts/upgrade.sh
+```
+
+脚本会自动完成：
+1. 导入 `dist/` 中的 3 个镜像（server、coding-agent-sandbox、agent-sandbox-controller）
+2. 加载配置：优先读取 `scripts/ai-factory.env`，否则从 K8s secret 读取凭证
+3. `helm upgrade --install` 升级 chart（保留凭证和模型配置）
+4. 等待 server 就绪
+5. 更新 agent-sandbox 控制器镜像
+6. 删除旧的 SandboxClaim（让新控制器重新创建，正确注入环境变量）
+7. 重建 sandbox warm pool pods
+
+#### 4. 验证更新
+
+```bash
+# 检查 Pod 状态
+kubectl get pods -n ai-factory
+
+# 查看更新历史
+helm history ai-factory -n ai-factory
+
+# 检查镜像版本
+kubectl get deployment ai-factory-server -n ai-factory \
+    -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+### 方式 2: 手动逐步升级
+
+如果需要细粒度控制，也可以手动执行每个步骤：
+
+#### 1. 打包新版本
+
+```bash
+cd ai-factory
+git pull
+./scripts/package.sh
+```
+
+#### 2. 导入新镜像
 
 ```bash
 cd dist/
@@ -67,7 +121,7 @@ nerdctl load < coding-agent-sandbox.tar
 kind load docker-image ai-factory-server:latest coding-agent-sandbox:latest
 ```
 
-### 4. 更新 Helm Release
+#### 3. 更新 Helm Release
 
 ```bash
 # 使用新 chart 更新
@@ -83,13 +137,13 @@ helm upgrade ai-factory ai-factory-chart/ \
 - `--reuse-values`：保留现有配置，只更新 chart 变更部分
 - 如果需要重置所有配置，去掉 `--reuse-values`
 
-### 5. 等待更新完成
+#### 4. 等待更新完成
 
 ```bash
 kubectl rollout status deployment/ai-factory-server -n ai-factory --timeout=120s
 ```
 
-### 6. 验证更新
+#### 5. 验证更新
 
 ```bash
 # 检查 Pod 状态
@@ -138,9 +192,9 @@ git checkout <old-tag-or-commit>
 # 2. 重新打包
 ./scripts/package.sh
 
-# 3. 传输并部署
-cd dist/
-./deploy-remote.sh
+# 3. 传输并运行升级脚本（自动导入镜像 + 升级 chart）
+rsync -avz --progress dist/ user@your-vm:/path/to/ai-factory/
+ssh user@your-vm "cd /path/to/ai-factory && ./scripts/upgrade.sh"
 ```
 
 ### 方式 3: 仅回滚镜像
@@ -246,7 +300,7 @@ components/agent-sandbox/install
 
 ```bash
 # 检查 CRD 版本
-kubectl get crd factorytasks.factory.ai-factory.dev -o yaml | grep -A5 "versions:"
+kubectl get crd factorytasks.factory.ai.gke.io -o yaml | grep -A5 "versions:"
 
 # 检查所有相关 CRD
 kubectl get crd | grep -E "factorytask|sandbox"
@@ -286,9 +340,9 @@ kubectl rollout status deployment/ai-factory-server -n ai-factory
 # 使用打包脚本
 ./scripts/package.sh
 
-# 传输并部署
-cd dist/
-./deploy-remote.sh
+# 传输并运行升级脚本（自动导入全部镜像 + 升级 chart + 重建 warm pool）
+rsync -avz --progress dist/ user@your-vm:/path/to/ai-factory/
+ssh user@your-vm "cd /path/to/ai-factory && ./scripts/upgrade.sh"
 ```
 
 ### 镜像版本管理

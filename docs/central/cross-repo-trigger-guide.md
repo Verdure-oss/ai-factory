@@ -41,7 +41,7 @@ ai-factory 的 process-issue.yaml 触发
 ```yaml
 # 轻量级 workflow：触发 ai-factory 仓库的 workflow
 # 当 Issue 被打标签时，通过 repository_dispatch 触发 ai-factory
-# 文档：docs/cross-repo-trigger-guide.md
+# 文档：docs/central/cross-repo-trigger-guide.md
 
 name: Trigger AI Factory
 
@@ -68,7 +68,7 @@ jobs:
           # 检查 token 是否配置
           if [[ -z "${{ secrets.AI_FACTORY_CROSS_REPO_TOKEN }}" ]]; then
             echo "❌ 错误: AI_FACTORY_CROSS_REPO_TOKEN 未配置"
-            echo "请参考 docs/cross-repo-trigger-guide.md 配置 secret"
+            echo "请参考 docs/central/cross-repo-trigger-guide.md 配置 secret"
             exit 1
           fi
 
@@ -153,7 +153,7 @@ jobs:
             echo "2. ai-factory 仓库的 process-issue.yaml 不存在"
             echo "3. 网络问题"
             echo ""
-            echo "请参考 docs/cross-repo-trigger-guide.md 的故障排除部分"
+            echo "请参考 docs/central/cross-repo-trigger-guide.md 的故障排除部分"
             exit 1
           fi
 

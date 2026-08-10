@@ -154,6 +154,16 @@ if [ -z "${AI_FACTORY_GIT_PROXY:-}" ]; then
     read -p "Git Proxy (optional, e.g. https://ghproxy.net): " AI_FACTORY_GIT_PROXY
 fi
 
+# Fork PR 工作流（可选）：向公共上游仓库提 PR 时，指定 fork 的所有者
+if [ -z "${GITHUB_FORK_OWNER:-}" ]; then
+    read -p "GitHub Fork Owner (optional, for fork PR workflow): " GITHUB_FORK_OWNER
+fi
+
+# 仓库 allow-list（可选）：限制哪些 owner/repo 允许触发，逗号分隔
+if [ -z "${GITHUB_REPOSITORY_ALLOWLIST:-}" ]; then
+    read -p "GitHub Repository Allow-List (optional, comma-separated owner/repo): " GITHUB_REPOSITORY_ALLOWLIST
+fi
+
 # 保存到 env 文件（首次部署时创建，方便后续热更新）
 if [ ! -f "${ENV_FILE}" ]; then
     cat > "${ENV_FILE}" <<EOF
@@ -166,6 +176,8 @@ OPENAI_API_KEY=${OPENAI_API_KEY}
 OPENAI_BASE_URL=${OPENAI_BASE_URL}
 OPENAI_MODEL=${OPENAI_MODEL}
 AI_FACTORY_GIT_PROXY=${AI_FACTORY_GIT_PROXY}
+GITHUB_FORK_OWNER=${GITHUB_FORK_OWNER:-}
+GITHUB_REPOSITORY_ALLOWLIST=${GITHUB_REPOSITORY_ALLOWLIST:-}
 EOF
     echo "   ✓ 配置已保存到 ${ENV_FILE}"
 fi
@@ -203,6 +215,21 @@ HELM_ARGS=(
 # 添加可选配置
 if [ -n "${AI_FACTORY_GIT_PROXY:-}" ]; then
     HELM_ARGS+=(--set gitProxy="${AI_FACTORY_GIT_PROXY}")
+fi
+
+if [ -n "${GITHUB_FORK_OWNER:-}" ]; then
+    HELM_ARGS+=(--set github.forkOwner="${GITHUB_FORK_OWNER}")
+fi
+
+# 仓库 allow-list：逗号分隔 → 多个 --set github.repositoryAllowList[i]
+if [ -n "${GITHUB_REPOSITORY_ALLOWLIST:-}" ]; then
+    IFS=',' read -ra REPOS <<< "${GITHUB_REPOSITORY_ALLOWLIST}"
+    idx=0
+    for repo in "${REPOS[@]}"; do
+        repo="$(echo "${repo}" | xargs)"  # trim whitespace
+        [ -n "${repo}" ] && HELM_ARGS+=(--set "github.repositoryAllowList[${idx}]=${repo}")
+        idx=$((idx + 1))
+    done
 fi
 
 helm upgrade --install ai-factory "${CHART_PATH}" \
