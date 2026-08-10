@@ -50,6 +50,23 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config.exploration_request_timeout_seconds, 180.0)
         self.assertEqual(config.final_request_timeout_seconds, 90.0)
         self.assertEqual(config.repair_request_timeout_seconds, 90.0)
+        self.assertTrue(config.vision_enabled)
+
+    def test_vision_disabled(self):
+        config = load_config(self.base_env(OPENAI_VISION_ENABLED="false"))
+        self.assertFalse(config.vision_enabled)
+
+    def test_vision_accepts_boolean_variants(self):
+        for raw in ("false", "0", "no", "off"):
+            config = load_config(self.base_env(OPENAI_VISION_ENABLED=raw))
+            self.assertFalse(config.vision_enabled, raw)
+        for raw in ("true", "1", "yes", "on"):
+            config = load_config(self.base_env(OPENAI_VISION_ENABLED=raw))
+            self.assertTrue(config.vision_enabled, raw)
+
+    def test_vision_invalid_value_is_rejected(self):
+        with self.assertRaises(InvalidAgentConfiguration):
+            load_config(self.base_env(OPENAI_VISION_ENABLED="maybe"))
 
     def test_api_key_required(self):
         with self.assertRaises(InvalidAgentConfiguration) as ctx:

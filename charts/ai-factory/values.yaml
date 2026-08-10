@@ -152,6 +152,10 @@ openai:
   finalRequestTimeoutSeconds: "90"
   # Repair request timeout in seconds
   repairRequestTimeoutSeconds: "90"
+  # Enable issue image input (multimodal). true = extract image URLs from the
+  # issue and send them as image_url content blocks so the model can read
+  # screenshots; false = keep the original text-only prompt.
+  visionEnabled: "true"
 
 # Namespace
 namespace: ai-factory

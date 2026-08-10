@@ -284,6 +284,7 @@ total_timeout_seconds = config.total_timeout_seconds
 exploration_request_timeout_seconds = config.exploration_request_timeout_seconds
 final_request_timeout_seconds = config.final_request_timeout_seconds
 repair_request_timeout_seconds = config.repair_request_timeout_seconds
+vision_enabled = config.vision_enabled
 execution_deadline = ExecutionDeadline(total_timeout_seconds)
 with open(required_env("AI_FACTORY_PROMPT_FILE"), "r", encoding="utf-8") as prompt_handle:
     prompt = prompt_handle.read()
@@ -292,9 +293,10 @@ if not prompt.strip():
     sys.exit(2)
 
 # Extract image URLs from the prompt and attach them as image_url content
-# blocks so a multimodal model can read issue screenshots. Without images the
-# user content stays a plain string, preserving the original text-only path.
-image_urls = extract_image_urls(prompt)
+# blocks so a multimodal model can read issue screenshots. When vision is
+# disabled (OPENAI_VISION_ENABLED=false) the user content stays a plain string
+# with image URLs embedded as text, matching the original text-only path.
+image_urls = extract_image_urls(prompt) if vision_enabled else []
 user_content = build_user_content(prompt, image_urls)
 
 system_prompt = """You are running inside an ai-factory sandbox.
@@ -619,7 +621,10 @@ def request_repair(round_number, round_limit, repair_prompt):
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
+                # Use the multimodal user content so a repair round still sees
+                # issue images; falls back to the plain prompt when vision is
+                # disabled or there are no images.
+                {"role": "user", "content": user_content},
                 {"role": "user", "content": repair_prompt},
             ],
             "tool_choice": "none",

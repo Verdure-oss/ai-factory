@@ -59,6 +59,7 @@ spec:
         - --agent-env=OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS
         - --agent-env=OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS
         - --agent-env=OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS
+        - --agent-env=OPENAI_VISION_ENABLED
         ports:
         - containerPort: 8080
           name: http

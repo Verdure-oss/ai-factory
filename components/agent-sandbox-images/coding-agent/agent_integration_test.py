@@ -172,6 +172,46 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertIsInstance(user_message["content"], str)
         self.assertEqual(user_message["content"], "No images here.")
 
+    def test_vision_disabled_keeps_image_urls_as_plain_text(self):
+        prompt = "Fix it.\n\n![screenshot](https://example.com/a.png)"
+        with completion_server([completion("printf 'no-vision-success\\n'")]) as server:
+            completed = self.run_agent(
+                server, prompt=prompt, OPENAI_VISION_ENABLED="false"
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        user_message = server.requests[0]["messages"][1]
+        self.assertIsInstance(user_message["content"], str)
+        self.assertIn("https://example.com/a.png", user_message["content"])
+
+    def test_repair_round_retains_image_content_blocks(self):
+        prompt = "Fix it.\n\n![screenshot](https://example.com/a.png)"
+        responses = [
+            completion("exit 1"),                 # generated script fails -> repair
+            completion("printf 'repair-ok\\n'"),  # repair script succeeds
+        ]
+        with completion_server(responses) as server:
+            completed = self.run_agent(
+                server,
+                prompt=prompt,
+                OPENAI_MAX_REPAIR_ROUNDS="1",
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("repair-ok", completed.stdout)
+        self.assertGreaterEqual(len(server.requests), 2)
+        # The repair request (second request) must still carry the image blocks
+        # so the model can see the issue screenshot while repairing.
+        repair_request = server.requests[1]
+        content = repair_request["messages"][1]["content"]
+        self.assertIsInstance(content, list)
+        image_urls = [
+            block["image_url"]["url"]
+            for block in content
+            if block["type"] == "image_url"
+        ]
+        self.assertIn("https://example.com/a.png", image_urls)
+
     def test_standalone_bash_fence_is_unwrapped_and_runs_from_repo_root(self):
         script = "\n".join(
             [
