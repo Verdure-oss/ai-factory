@@ -144,6 +144,9 @@ GITLAB_TOKEN=                               # GitLab Token
 3. 勾选 `repo` 权限
 4. 复制生成的 token
 
+> 注意:token 只是"凭证",**还要让这个 token 对应的 GitHub 账号拥有目标仓库的协作者权限**。
+> 对自有仓库无需操作;对公共/他人仓库,需要把该账号添加为目标仓库的协作者并授予 **Triage**(见 [配置 GitHub Webhook](#配置-github-webhook) 的第 0 步)。
+
 ### 2. 运行部署脚本
 
 ```bash
@@ -341,6 +344,33 @@ curl -X POST http://localhost:8080/webhook/github \
 
 ## 配置 GitHub Webhook
 
+> 说明:webhook 是在**目标仓库**(你希望 ai-factory 处理的仓库)上配置的,把该仓库的 Issue 事件转发到自托管服务。配置顺序:**先拿到目标仓库权限,再添加 webhook**。
+
+### 0. 目标仓库权限(前置条件)
+
+要让 ai-factory 在目标仓库上正常工作,需要两步权限准备:
+
+**① 添加 Webhook 需要 Admin 权限**
+- 只有仓库的 **Admin**(或 owner)才能在 `Settings → Webhooks` 添加 webhook。
+- 若你没有该仓库的 Admin,请让仓库 owner 添加 webhook,或授予你 Admin。
+
+**② 机器人账号需要至少 Triage 权限**
+- ai-factory 处理 Issue 时,会用 `GITHUB_TOKEN` 对应的账号(机器人)执行:
+  - 读取 Issue
+  - 给 Issue 打状态标签(`ai-factory-running` / `ai-factory-done`)
+  - 回帖评论(报告执行结果)
+- 这些操作要求机器人账号被添加为目标仓库的协作者,并授予至少 **Triage** 权限:
+
+| 权限 | 能做什么 | 是否满足 ai-factory |
+|------|----------|---------------------|
+| Read | 读仓库、开/评论 Issue | ❌ 无法打标签 |
+| **Triage** | Read + 管理 Issue 标签、关闭 Issue | ✅ **最低要求** |
+| Write | Triage + 直接推分支、建 PR | ✅(不走 fork 时需要) |
+| Admin | Write + 管理 Webhook | ✅ |
+
+- 添加方式:目标仓库 → `Settings → Collaborators and teams → Add people` → 输入机器人账号 → 选择 `Triage`。
+- **Fork 场景**:向公共仓库提 PR 时,上游只需 **Triage**(用于评论/打标签/读);PR 通过你自己的 fork 提交,不需要上游 Write(见 [Fork PR 工作流](#fork-pr-工作流向公共仓库提-pr))。
+
 ### 1. 获取服务地址
 
 **方式 1: 端口转发（本地测试）**
@@ -363,7 +393,9 @@ kubectl port-forward --address=0.0.0.0 svc/ai-factory-server 8080:80 -n ai-facto
 
 ### 2. 配置 Webhook
 
-1. 进入 GitHub 仓库 → Settings → Webhooks → Add webhook
+在**目标仓库**上配置(需要该仓库 Admin):
+
+1. 进入目标仓库 → Settings → Webhooks → Add webhook
 2. 填写配置：
 
 | 配置项 | 值 |
@@ -375,6 +407,11 @@ kubectl port-forward --address=0.0.0.0 svc/ai-factory-server 8080:80 -n ai-facto
 | Events | 选择 "Let me select individual events" → 勾选 "Issues" |
 
 3. 点击 "Add webhook" 保存
+
+> ⚠️ **事件类型必须选 "Issues",不要选 "Labels"**。
+> - "Issues" 事件会推送 issue 生命周期(含 `labeled` 打标签动作),服务端会**只**响应 `labeled`(其余 action 静默忽略)。
+> - "Labels" 事件只在"标签本身被创建/编辑/删除"时触发,且 payload **不含 issue 信息**,服务端无法据此创建任务,永远不会触发。
+> - 触发方式:先创建 Issue(不带触发标签),再**事后**打 `ai-factory-run` 标签(不能建 Issue 时直接选好标签提交,那样是 `opened` action,不会触发)。
 
 ### 3. 验证 Webhook
 
