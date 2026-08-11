@@ -279,7 +279,7 @@ spec:
 		t.Fatalf("commit command = %#v", commitStep.Command)
 	}
 	pushCommand := strings.Join(plan.Steps[8].Command, " ")
-	if !strings.Contains(pushCommand, "git -c http.version=HTTP/1.1 push --force-with-lease -u 'origin' 'ai-factory/fix-docs'") {
+	if !strings.Contains(pushCommand, "git -c http.version=HTTP/1.1 push --force -u 'origin' 'ai-factory/fix-docs'") {
 		t.Fatalf("push command = %#v", plan.Steps[8].Command)
 	}
 }
