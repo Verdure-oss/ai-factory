@@ -132,6 +132,17 @@ echo ""
 echo "4. 等待 ai-factory-server 就绪..."
 kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
 
+# 4.1 强制重建 server pod 以加载刚导入的新镜像
+# 镜像 tag 固定为 :latest 且 imagePullPolicy 为 IfNotPresent 时,helm upgrade
+# 不会因为镜像字符串未变化而重建 pod,导致新编译的 Go 代码(例如 plan.go 的
+# push --force 修复)不生效。rollout restart 强制重建,让 kubelet 重新解析
+# 本地刚 load/import 的 latest 镜像。
+echo ""
+echo "4.1 强制重建 ai-factory-server pod..."
+kubectl rollout restart deployment/ai-factory-server -n "${NAMESPACE}"
+kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
+echo "   ✓ ai-factory-server 已重建"
+
 # 5. 更新 agent-sandbox 控制器镜像（确保使用新版本）
 echo ""
 echo "5. 更新 agent-sandbox 控制器..."
