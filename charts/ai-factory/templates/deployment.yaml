@@ -38,6 +38,7 @@ spec:
         - --sandbox-template=go-dev
         - --watch-interval={{ .Values.watchInterval }}
         - --task-timeout={{ .Values.taskTimeout }}
+        - --max-concurrent-tasks={{ .Values.server.maxConcurrentTasks }}
         - --change-request={{ .Values.changeRequestEnabled }}
         - --report={{ .Values.reportEnabled }}
         {{- if .Values.github.forkOwner }}

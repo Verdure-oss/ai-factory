@@ -72,6 +72,15 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 		namespace = "default"
 	}
 
+	// Concurrency gate: at most opts.MaxConcurrentTasks tasks execute at once.
+	// Tasks beyond the limit are marked queued (ai-factory-waiting) in their own
+	// poll cycle and retried until a slot frees up. maxConcurrent <= 0 disables
+	// the gate (unlimited).
+	var sem chan struct{}
+	if opts.MaxConcurrentTasks > 0 {
+		sem = make(chan struct{}, opts.MaxConcurrentTasks)
+	}
+
 	fmt.Fprintf(cmd.ErrOrStderr(), "controller starting, watching namespace %s\n", namespace)
 
 	for {
@@ -96,8 +105,24 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 			if !tracker.tryAcquire(namespaceForTask(&task), task.Metadata.Name) {
 				continue
 			}
+			if sem != nil {
+				select {
+				case sem <- struct{}{}:
+					// slot acquired
+				default:
+					// concurrency full: mark queued, retry next poll cycle
+					tracker.release(namespaceForTask(&task), task.Metadata.Name)
+					markTaskQueued(cmd.ErrOrStderr(), &task)
+					continue
+				}
+			}
 			go func(t taskpkg.FactoryTask) {
-				defer tracker.release(namespaceForTask(&t), t.Metadata.Name)
+				defer func() {
+					if sem != nil {
+						<-sem
+					}
+					tracker.release(namespaceForTask(&t), t.Metadata.Name)
+				}()
 				if err := executeTask(cmd.ErrOrStderr(), &t, opts.TaskTimeout); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "task %s/%s failed: %v\n", namespaceForTask(&t), t.Metadata.Name, err)
 				}
@@ -106,6 +131,56 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 
 		time.Sleep(opts.WatchInterval)
 	}
+}
+
+// markTaskQueued idempotently marks a FactoryTask as queued (Pending + Queued
+// reason) when the concurrency gate is full, and sets the ai-factory-waiting
+// GitHub label so users see it is waiting for a free sandbox slot.
+func markTaskQueued(out io.Writer, task *taskpkg.FactoryTask) {
+	if isTaskQueued(task) {
+		return
+	}
+	if err := patchTaskStatus(namespaceForTask(task), task.Metadata.Name, taskpkg.StatusPatchOptions{
+		Phase:   taskpkg.PhasePending,
+		Reason:  "Queued",
+		Message: "Waiting for a free sandbox slot (max concurrent tasks reached)",
+	}); err != nil {
+		fmt.Fprintf(out, "mark queued %s: %v\n", task.Metadata.Name, err)
+		return
+	}
+	setIssueWaitingLabel(task)
+}
+
+// isTaskQueued reports whether a task is already marked as queued, so the
+// controller does not patching/label-spam it every poll cycle.
+func isTaskQueued(task *taskpkg.FactoryTask) bool {
+	if task.Status.Phase != taskpkg.PhasePending {
+		return false
+	}
+	for _, c := range task.Status.Conditions {
+		if c.Type == taskpkg.PhasePending && c.Reason == "Queued" {
+			return true
+		}
+	}
+	return false
+}
+
+// setIssueWaitingLabel sets the GitHub ai-factory-waiting label for a task.
+func setIssueWaitingLabel(task *taskpkg.FactoryTask) {
+	if task.Spec.Source.Provider != taskpkg.ProviderGitHub {
+		return
+	}
+	gh := NewGitHubClient()
+	if !gh.HasToken() {
+		return
+	}
+	repo := task.Spec.Source.Repository
+	issueNum := 0
+	fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
+	if repo == "" || issueNum <= 0 {
+		return
+	}
+	_ = gh.SetTaskWaiting(context.Background(), repo, issueNum)
 }
 
 func shouldReconcile(task taskpkg.FactoryTask) bool {

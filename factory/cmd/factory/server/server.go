@@ -50,6 +50,7 @@ type Options struct {
 	ReportEnabled       bool
 	ForkOwner           string
 	Repositories        []string
+	MaxConcurrentTasks  int
 }
 
 // Cmd represents the server command.
@@ -81,6 +82,7 @@ func init() {
 	Cmd.Flags().BoolVar(&opts.ReportEnabled, "report", true, "enable reporting comments")
 	Cmd.Flags().StringVar(&opts.ForkOwner, "fork-owner", "", "GitHub owner of the fork used for change requests; defaults to the authenticated token owner")
 	Cmd.Flags().StringArrayVar(&opts.Repositories, "repository", nil, "repository allowed to trigger FactoryTasks; can be repeated")
+	Cmd.Flags().IntVar(&opts.MaxConcurrentTasks, "max-concurrent-tasks", 2, "maximum number of tasks to execute concurrently; tasks beyond this are queued (0 = unlimited)")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {

@@ -58,9 +58,25 @@
 3. **热更新语义变化**：env 是 pod 创建时的快照，改配置后运行中的 go-dev 不更新，需重建预热 pod。`update-config.sh` 已覆盖此语义。
 4. **`envVarsInjectionPolicy: Allowed`**：go-dev 模板已允许 env 注入，方案兼容。
 
+## 并发闸门（max-concurrent-tasks）
+
+在 env 前置到 go-dev 模板之后，新增 server 层并发闸门，让"超出并发的任务排队等待"可控：
+
+| 文件 | 改动 |
+|---|---|
+| `factory/cmd/factory/server/server.go` | `Options` 加 `MaxConcurrentTasks`；flags 加 `--max-concurrent-tasks`（默认 2，0=不限） |
+| `factory/cmd/factory/server/controller.go` | `startControllerLoop` 用 buffered channel 信号量限流；满时任务标记 `Pending` + `Queued`，打 `ai-factory-waiting` 标签，下个轮询周期再试 |
+| `charts/ai-factory/values.yaml` | 加 `server.maxConcurrentTasks: 2` |
+| `charts/ai-factory/templates/deployment.yaml` | 加 `--max-concurrent-tasks={{ .Values.server.maxConcurrentTasks }}` |
+
+**使用建议**：`maxConcurrentTasks` 应 ≤ `sandbox.warmPoolReplicas`，这样正在执行的任务数量不会超过 go-dev 预热池能提供的 ready 实例，claim 始终能 adopt 预热池 go-dev，不会额外新建。
+
+**排队语义**：排队中的任务 phase=`Pending`、reason=`Queued`，GitHub 标签为 `ai-factory-waiting`；获取到信号量后进入正常流程（→ ClaimCreated → SandboxReady → Running）。
+
 ## 验证方式
 
 改动后触发一个任务，观察：
 - claim 的 `spec.env` 为空。
 - claim 绑定的 `sandboxName` 为 `go-dev-xxx`（预热池实例），而非 `github-xxx-claim`。
 - server 日志显示 `kubectl exec -n ai-factory go-dev-xxx ...`。
+- 并发超过 `maxConcurrentTasks` 时，多余任务显示 `ai-factory-waiting` 并排队。

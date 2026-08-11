@@ -11,6 +11,10 @@ server:
   # Server replica count
   replicaCount: 1
 
+  # Max tasks executed concurrently. Tasks beyond this are queued (ai-factory-waiting).
+  # Keep <= sandbox.warmPoolReplicas so requests can always adopt a warm pool pod.
+  maxConcurrentTasks: 2
+
   # Service configuration
   service:
     type: NodePort
