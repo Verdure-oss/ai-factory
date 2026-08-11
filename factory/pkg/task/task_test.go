@@ -679,7 +679,11 @@ spec:
 	}
 }
 
-func TestReconcileInjectsGitAuthTokenEnv(t *testing.T) {
+// TestReconcileDoesNotInjectEnv verifies that the claim no longer carries runtime
+// env (GITHUB_TOKEN, agent env, ...). Runtime config is loaded at go-dev creation
+// time via envFrom on the SandboxTemplate, so claim.spec.env stays empty. Keeping
+// it empty lets the standard agent-sandbox controller adopt warm pool pods.
+func TestReconcileDoesNotInjectEnv(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	t.Setenv("CODEX_API_KEY", "codex-token")
 	task, err := Parse([]byte(`
@@ -714,22 +718,11 @@ spec:
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	envs, ok := output.SandboxClaim.Spec["env"].([]interface{})
-	if !ok || len(envs) != 2 {
-		t.Fatalf("env = %#v", output.SandboxClaim.Spec["env"])
-	}
-	want := map[string]string{
-		"GITHUB_TOKEN":  "test-token",
-		"CODEX_API_KEY": "codex-token",
-	}
-	for i, rawEnv := range envs {
-		env, ok := rawEnv.(map[string]interface{})
-		if !ok {
-			t.Fatalf("env[%d] = %#v", i, rawEnv)
-		}
-		name, _ := env["name"].(string)
-		if want[name] == "" || env["value"] != want[name] || env["containerName"] != "dev" {
-			t.Fatalf("env[%d] = %#v", i, env)
+	// claim.spec.env must be absent/empty so agent-sandbox can adopt the warm pool.
+	envs, exists := output.SandboxClaim.Spec["env"]
+	if exists {
+		if list, ok := envs.([]interface{}); ok && len(list) > 0 {
+			t.Fatalf("expected claim to carry no env, got %#v", envs)
 		}
 	}
 }

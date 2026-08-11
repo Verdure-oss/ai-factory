@@ -14,6 +14,14 @@ spec:
       - name: {{ .Values.sandbox.containerName }}
         image: {{ include "ai-factory.sandboxImage" . }}
         imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
+        # Load runtime config (GITHUB_TOKEN, OPENAI_*, AI_FACTORY_GIT_PROXY, ...)
+        # at go-dev creation time so the claim does not need to carry env.
+        # Keeping claim.spec.env empty lets agent-sandbox adopt warm pool pods.
+        envFrom:
+        - secretRef:
+            name: ai-factory-credentials
+        - configMapRef:
+            name: ai-factory-config
         command:
         - /bin/bash
         - -lc
