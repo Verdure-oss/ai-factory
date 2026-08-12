@@ -18,6 +18,7 @@ data:
   OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.finalRequestTimeoutSeconds | quote }}
   OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.repairRequestTimeoutSeconds | quote }}
   OPENAI_VISION_ENABLED: {{ .Values.openai.visionEnabled | quote }}
+  MAX_CONCURRENT_TASKS: {{ .Values.server.maxConcurrentTasks | quote }}
   {{- if .Values.gitProxy }}
   AI_FACTORY_GIT_PROXY: {{ .Values.gitProxy | quote }}
   {{- end }}

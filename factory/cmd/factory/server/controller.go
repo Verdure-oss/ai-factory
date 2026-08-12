@@ -38,8 +38,8 @@ type factoryTaskList struct {
 
 // taskTracker tracks which tasks are currently being processed.
 type taskTracker struct {
-	mu       sync.Mutex
-	running  map[string]bool
+	mu      sync.Mutex
+	running map[string]bool
 }
 
 func newTaskTracker() *taskTracker {
@@ -138,7 +138,8 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 // resolveMaxConcurrentTasks resolves the concurrency limit with the following
 // precedence:
 //  1. --max-concurrent-tasks flag (when explicitly set),
-//  2. MAX_CONCURRENT_TASKS environment variable,
+//  2. MAX_CONCURRENT_TASKS via ReadConfig (Secret/ConfigMap file, then env —
+//     updateable through scripts/update-config.sh),
 //  3. default 2.
 //
 // A resolved value <= 0 means unlimited (no gate).
@@ -146,7 +147,7 @@ func resolveMaxConcurrentTasks(cmd *cobra.Command) int {
 	if cmd.Flags().Changed("max-concurrent-tasks") {
 		return opts.MaxConcurrentTasks
 	}
-	if v := os.Getenv("MAX_CONCURRENT_TASKS"); v != "" {
+	if v := taskpkg.ReadConfig("MAX_CONCURRENT_TASKS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
@@ -271,6 +272,13 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		})
 		reportTaskResult(out, task, taskpkg.PhaseFailed, fmt.Sprintf("SandboxClaim ready wait failed: %v", err))
 		return err
+	}
+
+	// Cancellation guard: the task may have been deleted (trigger label removed)
+	// while we waited for the sandbox to become ready. Abort quietly instead of
+	// running the plan — the cancellation path already cleaned up labels.
+	if taskCancelled(out, namespace, task.Metadata.Name) {
+		return nil
 	}
 
 	sandboxName, err := kubectlOutput("get", "sandboxclaim", claim, "-n", namespace, "-o", "jsonpath={.status.sandbox.name}")
@@ -412,6 +420,19 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	return nil
 }
 
+// taskCancelled reports whether the FactoryTask was deleted (trigger label
+// removed) while waiting for the sandbox to become ready. When cancelled it
+// logs the cancellation and returns true; the caller must abort without doing
+// any further work on the task — the cancellation path already cleaned up
+// labels and posted its own comment.
+func taskCancelled(out io.Writer, namespace, name string) bool {
+	if taskExists(namespace, name) {
+		return false
+	}
+	fmt.Fprintf(out, "--- CANCELLED: task %s deleted while waiting for sandbox\n", name)
+	return true
+}
+
 func createTaskChangeRequest(task *taskpkg.FactoryTask) (string, bool, error) {
 	if !opts.EnableChangeRequest || !task.Spec.ChangeRequest.Enabled {
 		return "", false, nil
@@ -448,12 +469,20 @@ func postStartedComment(task *taskpkg.FactoryTask) {
 		Provider:  reportingProvider(task),
 		TargetURL: task.Spec.Reporting.TargetURL,
 		Body:      body,
+		APIBase:   reportingAPIBase(task),
 	}); err != nil {
 		return
 	}
 }
 
 func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message string) {
+	// If the FactoryTask was deleted (e.g., cancelled by removing the trigger
+	// label), skip all reporting — the cancellation path already cleaned up labels
+	// and posted its own comment. Prevents a waiting goroutine whose claim was
+	// deleted mid-flight from misreporting failure.
+	if !taskExists(namespaceForTask(task), task.Metadata.Name) {
+		return
+	}
 	// Always update labels regardless of comment reporting
 	updateTaskLabels(task, phase)
 
@@ -467,6 +496,7 @@ func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message s
 		Provider:  reportingProvider(task),
 		TargetURL: task.Spec.Reporting.TargetURL,
 		Body:      body,
+		APIBase:   reportingAPIBase(task),
 	}); err != nil {
 		fmt.Fprintf(out, "--- REPORT FAILED: %v\n", err)
 		return
@@ -651,6 +681,17 @@ func reportingProvider(task *taskpkg.FactoryTask) string {
 	return task.Spec.Source.Provider
 }
 
+// reportingAPIBase returns the API base override for the task's reporting
+// provider, mirroring how NewGitHubClient honors GITHUB_API_BASE. It returns
+// "" when the provider has no override configured, in which case
+// PostIssueComment uses the provider default.
+func reportingAPIBase(task *taskpkg.FactoryTask) string {
+	if reportingProvider(task) == taskpkg.ProviderGitHub {
+		return taskpkg.ReadConfig("GITHUB_API_BASE")
+	}
+	return ""
+}
+
 func patchTaskStatus(namespace, name string, opts taskpkg.StatusPatchOptions) error {
 	patch, err := taskpkg.StatusMergePatch(opts)
 	if err != nil {
@@ -671,9 +712,23 @@ func listFactoryTasks(namespace string) ([]taskpkg.FactoryTask, error) {
 	return list.Items, nil
 }
 
+// taskExists is the seam the cancellation guards use to check whether a
+// FactoryTask still exists. Tests override it to simulate cancellation
+// without a live cluster.
+var taskExists = factoryTaskExists
+
 func factoryTaskExists(namespace, name string) bool {
 	_, err := kubectlOutput("get", "factorytask", name, "-n", namespace)
-	return err == nil
+	if err == nil {
+		return true
+	}
+	if isNotFoundError(err) {
+		return false
+	}
+	// Transient error (API-server blip, kubectl failure): conservatively
+	// treat the task as still existing so the cancellation guards remain
+	// no-ops and a healthy task is not silently dropped.
+	return true
 }
 
 func namespaceForTask(task *taskpkg.FactoryTask) string {
@@ -788,6 +843,13 @@ func waitForSandboxClaimReady(namespace, name string, timeout time.Duration) err
 		if err == nil && strings.TrimSpace(output) == "True" {
 			return nil
 		}
+		if isNotFoundError(err) {
+			// The claim was deleted out from under us (e.g. its task was
+			// cancelled while waiting). Fail fast instead of polling until
+			// the timeout so the caller's failure path runs promptly.
+			return fmt.Errorf("SandboxClaim %s/%s no longer exists: %v", namespace, name, err)
+		}
+		// Not Ready yet, or a transient error (API-server blip): keep polling.
 		time.Sleep(pollInterval)
 	}
 	return fmt.Errorf("timeout waiting for SandboxClaim %s/%s to be Ready after %v", namespace, name, timeout)

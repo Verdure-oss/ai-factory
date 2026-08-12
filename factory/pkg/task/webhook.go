@@ -134,7 +134,7 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 		APIVersion: APIVersion,
 		Kind:       Kind,
 		Metadata: ObjectMeta{
-			Name:      dnsName(fmt.Sprintf("%s-%s-%d", event.Provider, event.Repository, event.IssueNumber)),
+			Name:      FactoryTaskName(event.Provider, event.Repository, event.IssueNumber),
 			Namespace: opts.Namespace,
 			Labels: map[string]string{
 				"factory.ai.gke.io/provider": event.Provider,
@@ -579,6 +579,13 @@ func hostFromURL(rawURL, fallback string) string {
 		return fallback
 	}
 	return parsed.Hostname()
+}
+
+// FactoryTaskName returns the deterministic FactoryTask name for an issue.
+// Must stay in sync with FactoryTaskFromIssueWebhook so cancellation can
+// derive the same name from a webhook event.
+func FactoryTaskName(provider, repository string, issueNumber int) string {
+	return dnsName(fmt.Sprintf("%s-%s-%d", provider, repository, issueNumber))
 }
 
 func dnsName(value string) string {

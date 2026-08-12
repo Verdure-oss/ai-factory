@@ -18,9 +18,10 @@ type labelRequest struct {
 }
 
 // fakeGitHubAPI records all label operations and verifies correctness.
-func fakeGitHubAPI(t *testing.T, labelsOnIssue []string) (*httptest.Server, *[]labelRequest) {
+func fakeGitHubAPI(t *testing.T, labelsOnIssue []string) (*httptest.Server, *[]labelRequest, *[]string) {
 	t.Helper()
 	var ops []labelRequest
+	var comments []string
 	currentLabels := make(map[string]bool)
 	for _, l := range labelsOnIssue {
 		currentLabels[l] = true
@@ -34,7 +35,6 @@ func fakeGitHubAPI(t *testing.T, labelsOnIssue []string) (*httptest.Server, *[]l
 			body, _ := io.ReadAll(r.Body)
 			var payload map[string]string
 			json.Unmarshal(body, &payload)
-			// Label created (no-op for our tracking)
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(payload)
 			return
@@ -67,10 +67,22 @@ func fakeGitHubAPI(t *testing.T, labelsOnIssue []string) (*httptest.Server, *[]l
 			return
 		}
 
+		// POST /repos/{owner}/{repo}/issues/{num}/comments — PostComment
+		if r.Method == "POST" && strings.HasSuffix(path, "/comments") {
+			body, _ := io.ReadAll(r.Body)
+			var payload map[string]string
+			if err := json.Unmarshal(body, &payload); err == nil {
+				comments = append(comments, payload["body"])
+			}
+			w.WriteHeader(201)
+			json.NewEncoder(w).Encode(payload)
+			return
+		}
+
 		w.WriteHeader(404)
 	}))
 
-	return server, &ops
+	return server, &ops, &comments
 }
 
 func labelsAfterOps(ops []labelRequest) map[string]bool {
@@ -87,7 +99,7 @@ func labelsAfterOps(ops []labelRequest) map[string]bool {
 }
 
 func TestSetTaskWaiting(t *testing.T) {
-	server, ops := fakeGitHubAPI(t, []string{"ai-factory-run", "ai-factory-running"})
+	server, ops, _ := fakeGitHubAPI(t, []string{"ai-factory-run", "ai-factory-running"})
 	defer server.Close()
 
 	gh := &GitHubClient{
@@ -111,7 +123,7 @@ func TestSetTaskWaiting(t *testing.T) {
 }
 
 func TestSetTaskRunningRemovesWaiting(t *testing.T) {
-	server, ops := fakeGitHubAPI(t, []string{"ai-factory-waiting"})
+	server, ops, _ := fakeGitHubAPI(t, []string{"ai-factory-waiting"})
 	defer server.Close()
 
 	gh := &GitHubClient{
@@ -135,7 +147,7 @@ func TestSetTaskRunningRemovesWaiting(t *testing.T) {
 }
 
 func TestSetTaskDoneRemovesWaiting(t *testing.T) {
-	server, ops := fakeGitHubAPI(t, []string{"ai-factory-waiting"})
+	server, ops, _ := fakeGitHubAPI(t, []string{"ai-factory-waiting"})
 	defer server.Close()
 
 	gh := &GitHubClient{
@@ -162,7 +174,7 @@ func TestSetTaskDoneRemovesWaiting(t *testing.T) {
 }
 
 func TestSetTaskFailedRemovesWaiting(t *testing.T) {
-	server, ops := fakeGitHubAPI(t, []string{"ai-factory-waiting"})
+	server, ops, _ := fakeGitHubAPI(t, []string{"ai-factory-waiting"})
 	defer server.Close()
 
 	gh := &GitHubClient{
@@ -188,7 +200,7 @@ func TestSetTaskFailedRemovesWaiting(t *testing.T) {
 // TestFullLabelTransitionFlow simulates the complete label lifecycle
 // as it would happen during a real task execution with warm pool waiting.
 func TestFullLabelTransitionFlow(t *testing.T) {
-	server, ops := fakeGitHubAPI(t, []string{"ai-factory"})
+	server, ops, _ := fakeGitHubAPI(t, []string{"ai-factory"})
 	defer server.Close()
 
 	gh := &GitHubClient{
@@ -339,5 +351,36 @@ func TestIsAlreadyExistsError(t *testing.T) {
 				t.Errorf("isAlreadyExistsError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSetTaskCancelled(t *testing.T) {
+	server, ops, comments := fakeGitHubAPI(t, []string{"ai-factory-run", "ai-factory-waiting"})
+	defer server.Close()
+
+	gh := &GitHubClient{
+		token:   "fake-token",
+		apiBase: server.URL,
+		client:  server.Client(),
+	}
+
+	err := gh.SetTaskCancelled(context.Background(), "owner/repo", 42, "ai-factory-run")
+	if err != nil {
+		t.Fatalf("SetTaskCancelled failed: %v", err)
+	}
+
+	labels := labelsAfterOps(*ops)
+	if labels["ai-factory-waiting"] {
+		t.Error("expected ai-factory-waiting label to be removed")
+	}
+	if labels["ai-factory-running"] {
+		t.Error("expected ai-factory-running label to be removed")
+	}
+	if len(*comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(*comments))
+	}
+	want := "ai-factory 已取消 #42：触发标签 ai-factory-run 被移除（任务尚未开始执行）"
+	if (*comments)[0] != want {
+		t.Fatalf("comment = %q, want %q", (*comments)[0], want)
 	}
 }
