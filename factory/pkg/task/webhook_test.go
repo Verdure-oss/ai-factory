@@ -509,3 +509,24 @@ func TestFactoryTaskFromGitHubIssueWebhookWithForkOwner(t *testing.T) {
 		t.Fatalf("repository must stay upstream, got %q", task.Spec.Source.Repository)
 	}
 }
+
+func TestFactoryTaskName(t *testing.T) {
+	cases := []struct {
+		name       string
+		provider   string
+		repository string
+		num        int
+		want       string
+	}{
+		{"github", "github", "liyuerich/ai-factory", 42, "github-liyuerich-ai-factory-42"},
+		{"gitlab", "gitlab", "platform/ai-factory", 7, "gitlab-platform-ai-factory-7"},
+		{"uppercase normalized", "github", "Owner/Repo", 1, "github-owner-repo-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FactoryTaskName(tc.provider, tc.repository, tc.num); got != tc.want {
+				t.Fatalf("FactoryTaskName(%q, %q, %d) = %q, want %q", tc.provider, tc.repository, tc.num, got, tc.want)
+			}
+		})
+	}
+}
