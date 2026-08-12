@@ -273,6 +273,14 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		return err
 	}
 
+	// Cancellation guard: the task may have been deleted (trigger label removed)
+	// while we waited for the sandbox to become ready. Abort quietly instead of
+	// running the plan — the cancellation path already cleaned up labels.
+	if !factoryTaskExists(namespace, task.Metadata.Name) {
+		fmt.Fprintf(out, "--- CANCELLED: task %s deleted while waiting for sandbox\n", task.Metadata.Name)
+		return nil
+	}
+
 	sandboxName, err := kubectlOutput("get", "sandboxclaim", claim, "-n", namespace, "-o", "jsonpath={.status.sandbox.name}")
 	if err != nil {
 		return err
@@ -454,6 +462,13 @@ func postStartedComment(task *taskpkg.FactoryTask) {
 }
 
 func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message string) {
+	// If the FactoryTask was deleted (e.g., cancelled by removing the trigger
+	// label), skip all reporting — the cancellation path already cleaned up labels
+	// and posted its own comment. Prevents a waiting goroutine whose claim was
+	// deleted mid-flight from misreporting failure.
+	if !factoryTaskExists(namespaceForTask(task), task.Metadata.Name) {
+		return
+	}
 	// Always update labels regardless of comment reporting
 	updateTaskLabels(task, phase)
 
