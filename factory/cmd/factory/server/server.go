@@ -33,28 +33,29 @@ import (
 
 // Options holds server configuration.
 type Options struct {
-	Addr                string
-	Namespace           string
-	WebhookSecret       string
-	AgentName           string
-	AgentCommand        string
-	SmokeAgentCommand   string
-	AgentEnv            []string
-	SandboxTemplateRef  string
-	ContainerName       string
-	SmokeCommands       []string
-	ValidationCommands  []string
-	WatchInterval       time.Duration
-	TaskTimeout         time.Duration
-	EnableChangeRequest bool
-	ReportEnabled       bool
-	ForkOwner           string
-	Repositories        []string
-	MaxConcurrentTasks  int
-	CIWatchEnabled      bool
-	CIWatchMaxRetries   int
-	CIWatchMaxWait      time.Duration
-	CIWatchPollInterval time.Duration
+	Addr                  string
+	Namespace             string
+	WebhookSecret         string
+	AgentName             string
+	AgentCommand          string
+	SmokeAgentCommand     string
+	AgentEnv              []string
+	SandboxTemplateRef    string
+	ContainerName         string
+	SmokeCommands         []string
+	ValidationCommands    []string
+	WatchInterval         time.Duration
+	TaskTimeout           time.Duration
+	EnableChangeRequest   bool
+	ReportEnabled         bool
+	ForkOwner             string
+	Repositories          []string
+	MaxConcurrentTasks    int
+	CIWatchEnabled        bool
+	CIWatchMaxRetries     int
+	CIWatchMaxWait        time.Duration
+	CIWatchPollInterval   time.Duration
+	CIWatchSettleInterval time.Duration
 }
 
 // Cmd represents the server command.
@@ -91,6 +92,7 @@ func init() {
 	Cmd.Flags().IntVar(&opts.CIWatchMaxRetries, "ci-watch-max-retries", 3, "max CI repair cycles before failing the task (CI_WATCH_MAX_RETRIES overrides)")
 	Cmd.Flags().DurationVar(&opts.CIWatchMaxWait, "ci-watch-max-wait", 30*time.Minute, "max time to wait for CI per cycle (CI_WATCH_MAX_WAIT overrides)")
 	Cmd.Flags().DurationVar(&opts.CIWatchPollInterval, "ci-watch-interval", 60*time.Second, "CI status poll interval (CI_WATCH_RETRY_INTERVAL overrides)")
+	Cmd.Flags().DurationVar(&opts.CIWatchSettleInterval, "ci-watch-settle-interval", 90*time.Second, "window to wait for late-registering check runs before declaring CI green (CI_WATCH_SETTLE_INTERVAL overrides)")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {

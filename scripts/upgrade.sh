@@ -124,6 +124,7 @@ HELM_ARGS=(
 [ -n "${CI_WATCH_MAX_RETRIES:-}" ] && HELM_ARGS+=(--set server.ciWatchMaxRetries="${CI_WATCH_MAX_RETRIES}")
 [ -n "${CI_WATCH_MAX_WAIT:-}" ] && HELM_ARGS+=(--set server.ciWatchMaxWait="${CI_WATCH_MAX_WAIT}")
 [ -n "${CI_WATCH_RETRY_INTERVAL:-}" ] && HELM_ARGS+=(--set server.ciWatchPollInterval="${CI_WATCH_RETRY_INTERVAL}")
+[ -n "${CI_WATCH_SETTLE_INTERVAL:-}" ] && HELM_ARGS+=(--set server.ciWatchSettleInterval="${CI_WATCH_SETTLE_INTERVAL}")
 
 helm upgrade --install ai-factory "${CHART_PATH}" \
     --namespace "${NAMESPACE}" \

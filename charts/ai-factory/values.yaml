@@ -20,6 +20,7 @@ server:
   ciWatchMaxRetries: 3
   ciWatchMaxWait: 30m
   ciWatchPollInterval: 60s
+  ciWatchSettleInterval: 90s
 
   # Service configuration
   service:

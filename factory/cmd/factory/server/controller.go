@@ -893,9 +893,10 @@ type ciRepairRunner func(annotations []CheckRunAnnotation) error
 
 // ciWatchOptions bounds the CI watch loop.
 type ciWatchOptions struct {
-	maxRetries   int
-	maxWait      time.Duration
-	pollInterval time.Duration
+	maxRetries     int
+	maxWait        time.Duration
+	pollInterval   time.Duration
+	settleInterval time.Duration
 }
 
 // ciWatchOutcome is the result of the CI watch loop.
@@ -943,21 +944,70 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 }
 
 // pollCheckRuns polls check-runs until green/red or the wait budget expires.
+// A green verdict requires a settle window: GitHub registers check runs
+// lazily (especially reusable-workflow callers like "e2e_test / call_e2e"),
+// so a first all-green sighting may still be missing jobs that are about to
+// appear and fail. We only declare green when two consecutive polls after the
+// settle interval observe the same set of check runs, all completed and
+// non-failing.
 func pollCheckRuns(gh ciClient, owner, repo, sha string, opts ciWatchOptions) (ciCheckStatus, string) {
 	deadline := time.Now().Add(opts.maxWait)
+	var confirmedNames map[string]bool
 	for {
 		runs, err := gh.ListCheckRuns(context.Background(), owner, repo, sha)
 		if err != nil {
 			return ciCheckError, fmt.Sprintf("list check runs: %v", err)
 		}
-		if status := evaluateCheckRuns(runs); status != ciCheckPending {
-			return status, summarizeCheckRuns(runs)
+		switch evaluateCheckRuns(runs) {
+		case ciCheckGreen:
+			names := checkRunNames(runs)
+			if confirmedNames != nil && equalCheckRunSet(confirmedNames, names) {
+				// Same non-nil set seen green across the settle window: stable, declare green.
+				return ciCheckGreen, summarizeCheckRuns(runs)
+			}
+			// First (or changed) all-green observation: record it and wait the
+			// settle window for late-registering check runs before confirming.
+			confirmedNames = names
+			if opts.settleInterval <= 0 || time.Now().Add(opts.settleInterval).After(deadline) {
+				return ciCheckGreen, summarizeCheckRuns(runs)
+			}
+			time.Sleep(opts.settleInterval)
+			continue
+		case ciCheckRed:
+			return ciCheckRed, summarizeCheckRuns(runs)
+		case ciCheckError:
+			return ciCheckError, "unexpected check-run API error"
+		default: // pending
+			confirmedNames = nil
 		}
 		if time.Now().After(deadline) {
 			return ciCheckPending, fmt.Sprintf("CI pending after %s", opts.maxWait)
 		}
 		time.Sleep(opts.pollInterval)
 	}
+}
+
+// checkRunNames returns the set of check-run names currently registered.
+func checkRunNames(runs []CheckRun) map[string]bool {
+	names := make(map[string]bool, len(runs))
+	for _, r := range runs {
+		names[r.Name] = true
+	}
+	return names
+}
+
+// equalCheckRunSet reports whether two sets of check-run names are identical
+// (both nil counts as equal — used to confirm a stable green across polls).
+func equalCheckRunSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name := range a {
+		if !b[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // collectFailedAnnotations returns all failure annotations across failing check runs.
@@ -1001,7 +1051,7 @@ func ciRepairRunnerFor(task *taskpkg.FactoryTask, namespace, sandboxName, prURL 
 // flag-resolved opts (cobra applies flag defaults), then override from
 // ReadConfig so scripts/update-config.sh can hot-update them.
 func resolveCIWatchOptions() ciWatchOptions {
-	o := ciWatchOptions{maxRetries: opts.CIWatchMaxRetries, maxWait: opts.CIWatchMaxWait, pollInterval: opts.CIWatchPollInterval}
+	o := ciWatchOptions{maxRetries: opts.CIWatchMaxRetries, maxWait: opts.CIWatchMaxWait, pollInterval: opts.CIWatchPollInterval, settleInterval: opts.CIWatchSettleInterval}
 	if v := taskpkg.ReadConfig("CI_WATCH_MAX_RETRIES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			o.maxRetries = n
@@ -1015,6 +1065,11 @@ func resolveCIWatchOptions() ciWatchOptions {
 	if v := taskpkg.ReadConfig("CI_WATCH_RETRY_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			o.pollInterval = d
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_SETTLE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			o.settleInterval = d
 		}
 	}
 	return o
