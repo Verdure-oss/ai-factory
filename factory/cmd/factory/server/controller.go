@@ -138,7 +138,8 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 // resolveMaxConcurrentTasks resolves the concurrency limit with the following
 // precedence:
 //  1. --max-concurrent-tasks flag (when explicitly set),
-//  2. MAX_CONCURRENT_TASKS environment variable,
+//  2. MAX_CONCURRENT_TASKS via ReadConfig (Secret/ConfigMap file, then env —
+//     updateable through scripts/update-config.sh),
 //  3. default 2.
 //
 // A resolved value <= 0 means unlimited (no gate).
@@ -146,7 +147,7 @@ func resolveMaxConcurrentTasks(cmd *cobra.Command) int {
 	if cmd.Flags().Changed("max-concurrent-tasks") {
 		return opts.MaxConcurrentTasks
 	}
-	if v := os.Getenv("MAX_CONCURRENT_TASKS"); v != "" {
+	if v := taskpkg.ReadConfig("MAX_CONCURRENT_TASKS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
