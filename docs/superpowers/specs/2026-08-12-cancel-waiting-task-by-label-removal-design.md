@@ -1,7 +1,7 @@
 # 取消 waiting 任务：移除触发标签即取消
 
 日期：2026-08-12
-状态：已批准（用户确认）
+状态：已批准（用户确认）（已实现，见 plans/2026-08-12-cancel-waiting-task-on-label-removal.md）
 
 ## 背景与目标
 
