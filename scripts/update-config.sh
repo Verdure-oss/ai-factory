@@ -4,6 +4,8 @@
 #
 # 从 .env 文件读取配置，分别更新 K8s Secret 和 ConfigMap。
 # K8s 会在 ~30s 内自动同步文件到 Pod，无需重启。
+# 例外：MAX_CONCURRENT_TASKS 需重启 ai-factory-server 才生效（并发信号量在启动时创建），
+#       脚本检测到该配置时会自动滚动重启 server。
 #
 # 默认读取: scripts/ai-factory.env
 
@@ -124,3 +126,17 @@ echo ""
 echo "📌 验证方法: 触发新 issue，然后检查任务绑定的 sandbox 是否为 go-dev（而非独立的 claim pod）:"
 echo "   kubectl get sandboxclaims -n ${NAMESPACE} --sort-by=.metadata.creationTimestamp \\"
 echo "       -o jsonpath='{.items[-1].status.sandbox.name}'"
+
+# MAX_CONCURRENT_TASKS 需要重启 server 才生效（并发信号量 sem 在启动时创建）。
+# 仅当 .env 中显式配置了该值时重启；其余配置走文件热更新，无需重启。
+echo ""
+if [ -n "${CONFIG[MAX_CONCURRENT_TASKS]:-}" ]; then
+    echo "🔄 重启 ai-factory-server（使 MAX_CONCURRENT_TASKS 生效）..."
+    if kubectl rollout restart deployment ai-factory-server -n "${NAMESPACE}" 2>/dev/null; then
+        echo "   ✓ ai-factory-server 正在滚动重启，新并发数将在新的 Pod 生效"
+    else
+        echo "   ⚠ 重启 ai-factory-server 失败，请手动执行: kubectl rollout restart deployment ai-factory-server -n ${NAMESPACE}"
+    fi
+else
+    echo "ℹ️  MAX_CONCURRENT_TASKS 未配置，跳过 server 重启（其余配置热更新已生效）"
+fi
