@@ -16,6 +16,7 @@ package task
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -394,4 +395,28 @@ func cloneHost(cloneURL string) (string, error) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// BuildCIRepairScript builds a single shell script that runs the coding agent
+// with CI-failure repair instructions against the existing checkout, then
+// commits and force-pushes the fix to the change branch (updating the PR).
+// The agent never commits or pushes; this script runs them after the agent.
+func BuildCIRepairScript(task *FactoryTask, repairInstructions string) (string, error) {
+	if task == nil {
+		return "", errors.New("FactoryTask is required")
+	}
+	workDir := "/workspace/repo"
+	agentCommand := task.Spec.Agent.Command
+	if agentCommand == "" {
+		agentCommand = "ai-factory-agent openai-compatible"
+	}
+	changeBranch, _, remoteName, commitMessage, authorName, authorEmail, _, _ := changeRequestDefaults(task)
+	return fmt.Sprintf(`set -eu
+%s
+%s
+%s`,
+		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand),
+		commitChangesScript(workDir, commitMessage, authorName, authorEmail),
+		pushChangeBranchScript(workDir, remoteName, changeBranch, task.Spec.Source.BaseRef),
+	), nil
 }

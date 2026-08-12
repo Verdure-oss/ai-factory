@@ -58,6 +58,8 @@ const (
 	// NoChangeRequest means the task expected a change request but no commit,
 	// branch update, or pull/merge request was created.
 	NoChangeRequest FailureReason = "NoChangeRequest"
+	// CIFeedbackFailed means GitHub CI did not pass after the configured repair attempts.
+	CIFeedbackFailed FailureReason = "CIFeedbackFailed"
 )
 
 // FailureClassification groups the stable reason and a user-friendly message
@@ -203,5 +205,6 @@ func FailureReasonList() []FailureReason {
 		ValidationFailed,
 		CommandUnavailable,
 		NoChangeRequest,
+		CIFeedbackFailed,
 	}
 }

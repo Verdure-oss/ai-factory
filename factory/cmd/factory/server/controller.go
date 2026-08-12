@@ -380,6 +380,30 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		reportTaskResult(out, task, taskpkg.PhaseFailed, err.Error())
 		return err
 	}
+	// CI feedback loop: after the PR is created, watch GitHub CI. On failure,
+	// collect annotations and repair in the reused sandbox, force-pushing the
+	// fix back to the same PR, until CI is green or the retry budget runs out.
+	if resultURL != "" && reportCIWatchEnabled() {
+		fmt.Fprintf(out, "--- CI gathering check results for %s\n", resultURL)
+		outcome, summary := watchAndRepairCI(out, task, resultURL, NewGitHubClient(), ciRepairRunnerFor(task, namespace, sandboxName, resultURL), resolveCIWatchOptions())
+		if outcome != ciWatchGreen {
+			failure := taskpkg.FailureClassification{
+				Reason:     taskpkg.CIFeedbackFailed,
+				Friendly:   "GitHub CI did not pass after repair attempts",
+				RawMessage: summary,
+			}
+			_ = patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
+				Phase:            taskpkg.PhaseFailed,
+				Reason:           "CIFeedbackFailed",
+				Message:          "GitHub CI failed after repair attempts: " + summary,
+				SandboxClaimName: claim,
+				SandboxName:      sandboxName,
+				FailureReason:    failure,
+			})
+			reportTaskResult(out, task, taskpkg.PhaseFailed, "GitHub CI failed after repair attempts: "+summary)
+			return fmt.Errorf("ci feedback failed: %s", summary)
+		}
+	}
 	if changeRequestAlreadyExists {
 		resultMessage = changeRequestReportMessage(task, resultURL, true, changedFiles)
 		if err := patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
@@ -853,4 +877,153 @@ func waitForSandboxClaimReady(namespace, name string, timeout time.Duration) err
 		time.Sleep(pollInterval)
 	}
 	return fmt.Errorf("timeout waiting for SandboxClaim %s/%s to be Ready after %v", namespace, name, timeout)
+}
+
+// ciClient abstracts the GitHub CI API for testability.
+type ciClient interface {
+	PullRequestHeadSHA(ctx context.Context, owner, repo string, number int) (string, error)
+	ListCheckRuns(ctx context.Context, owner, repo, sha string) ([]CheckRun, error)
+	ListCheckRunAnnotations(ctx context.Context, owner, repo string, checkRunID int64) ([]CheckRunAnnotation, error)
+}
+
+// ciRepairRunner repairs a CI failure inside the reused sandbox and drives the
+// fix back to the PR branch.
+type ciRepairRunner func(annotations []CheckRunAnnotation) error
+
+// ciWatchOptions bounds the CI watch loop.
+type ciWatchOptions struct {
+	maxRetries   int
+	maxWait      time.Duration
+	pollInterval time.Duration
+}
+
+// ciWatchOutcome is the result of the CI watch loop.
+type ciWatchOutcome int
+
+const (
+	ciWatchGreen  ciWatchOutcome = 0
+	ciWatchFailed ciWatchOutcome = 1
+)
+
+// watchAndRepairCI polls a PR's CI until green, red, or the wait budget
+// expires. On red it invokes repair (which fixes and force-pushes, updating the
+// PR head SHA) and re-polls, up to maxRetries. It returns the outcome and a
+// failure summary for reporting.
+func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh ciClient, repair ciRepairRunner, opts ciWatchOptions) (ciWatchOutcome, string) {
+	owner, repo, number, err := parsePullRequestURL(prURL)
+	if err != nil {
+		return ciWatchFailed, fmt.Sprintf("parse PR URL %q: %v", prURL, err)
+	}
+	var lastSummary string
+	for attempt := 0; attempt < opts.maxRetries; attempt++ {
+		sha, err := gh.PullRequestHeadSHA(context.Background(), owner, repo, number)
+		if err != nil {
+			return ciWatchFailed, fmt.Sprintf("get PR head sha: %v", err)
+		}
+		status, summary := pollCheckRuns(gh, owner, repo, sha, opts)
+		lastSummary = summary
+		switch status {
+		case ciCheckGreen:
+			fmt.Fprintf(out, "--- CI GREEN (%s)\n", sha)
+			return ciWatchGreen, summary
+		case ciCheckRed:
+			annotations := collectFailedAnnotations(gh, owner, repo, sha)
+			fmt.Fprintf(out, "--- CI FAILED on %s (attempt %d/%d); repairing\n%s", sha, attempt+1, opts.maxRetries, formatCIFailures(annotations))
+			if err := repair(annotations); err != nil {
+				return ciWatchFailed, fmt.Sprintf("repair failed: %v", err)
+			}
+		case ciCheckError:
+			return ciWatchFailed, fmt.Sprintf("check-runs API error: %s", summary)
+		default: // ciCheckPending with budget exhausted
+			return ciWatchFailed, fmt.Sprintf("CI still pending after %s", opts.maxWait)
+		}
+	}
+	return ciWatchFailed, fmt.Sprintf("CI still failing after %d repair attempts:\n%s", opts.maxRetries, lastSummary)
+}
+
+// pollCheckRuns polls check-runs until green/red or the wait budget expires.
+func pollCheckRuns(gh ciClient, owner, repo, sha string, opts ciWatchOptions) (ciCheckStatus, string) {
+	deadline := time.Now().Add(opts.maxWait)
+	for {
+		runs, err := gh.ListCheckRuns(context.Background(), owner, repo, sha)
+		if err != nil {
+			return ciCheckError, fmt.Sprintf("list check runs: %v", err)
+		}
+		if status := evaluateCheckRuns(runs); status != ciCheckPending {
+			return status, summarizeCheckRuns(runs)
+		}
+		if time.Now().After(deadline) {
+			return ciCheckPending, fmt.Sprintf("CI pending after %s", opts.maxWait)
+		}
+		time.Sleep(opts.pollInterval)
+	}
+}
+
+// collectFailedAnnotations returns all failure annotations across failing check runs.
+func collectFailedAnnotations(gh ciClient, owner, repo, sha string) []CheckRunAnnotation {
+	runs, err := gh.ListCheckRuns(context.Background(), owner, repo, sha)
+	if err != nil {
+		return nil
+	}
+	var all []CheckRunAnnotation
+	for _, r := range runs {
+		if r.Status != "completed" || isNonFailingConclusion(r.Conclusion) {
+			continue
+		}
+		anns, err := gh.ListCheckRunAnnotations(context.Background(), owner, repo, r.ID)
+		if err != nil {
+			continue
+		}
+		all = append(all, anns...)
+	}
+	return all
+}
+
+// ciRepairRunnerFor returns a repair runner that runs BuildCIRepairScript in the
+// reused sandbox via kubectl exec.
+func ciRepairRunnerFor(task *taskpkg.FactoryTask, namespace, sandboxName, prURL string) ciRepairRunner {
+	containerName := task.Spec.Sandbox.ContainerName
+	if containerName == "" {
+		containerName = "dev"
+	}
+	return func(annotations []CheckRunAnnotation) error {
+		instructions := buildCIRepairInstructions(task.Spec.Work.Instructions, prURL, annotations)
+		script, err := taskpkg.BuildCIRepairScript(task, instructions)
+		if err != nil {
+			return err
+		}
+		return runKubectl(nil, "exec", "-n", namespace, sandboxName, "-c", containerName, "--", "/bin/sh", "-lc", script)
+	}
+}
+
+// resolveCIWatchOptions resolves the CI watch settings. Seed from the
+// flag-resolved opts (cobra applies flag defaults), then override from
+// ReadConfig so scripts/update-config.sh can hot-update them.
+func resolveCIWatchOptions() ciWatchOptions {
+	o := ciWatchOptions{maxRetries: opts.CIWatchMaxRetries, maxWait: opts.CIWatchMaxWait, pollInterval: opts.CIWatchPollInterval}
+	if v := taskpkg.ReadConfig("CI_WATCH_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			o.maxRetries = n
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_MAX_WAIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			o.maxWait = d
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_RETRY_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			o.pollInterval = d
+		}
+	}
+	return o
+}
+
+// reportCIWatchEnabled reports whether CI watching is enabled (opts flag, with
+// CI_WATCH_ENABLED env/config override).
+func reportCIWatchEnabled() bool {
+	if v := taskpkg.ReadConfig("CI_WATCH_ENABLED"); v != "" {
+		return strings.EqualFold(v, "true") || v == "1"
+	}
+	return opts.CIWatchEnabled
 }
