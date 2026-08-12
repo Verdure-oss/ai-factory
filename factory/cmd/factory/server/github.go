@@ -262,8 +262,7 @@ func (c *GitHubClient) SetTaskCancelled(ctx context.Context, repo string, issueN
 	}
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRunning)
 	_ = c.RemoveLabel(ctx, repo, issueNumber, labelWaiting)
-	return c.PostComment(ctx, repo, issueNumber, fmt.Sprintf(
-		"ai-factory 已取消 #%d：触发标签 %s 被移除（任务尚未开始执行）", issueNumber, removedTriggerLabel))
+	return c.PostComment(ctx, repo, issueNumber, cancelCommentBody(issueNumber, removedTriggerLabel))
 }
 
 func (c *GitHubClient) setHeaders(req *http.Request) {

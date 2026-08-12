@@ -304,6 +304,17 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 // SandboxClaim labels use dnsLabel(task.Metadata.Name), which is a no-op on
 // dnsName output, so the raw name is a valid label selector value.
 func handleIssueCancel(w http.ResponseWriter, cmd *cobra.Command, event *taskpkg.IssueWebhookEvent) {
+	// Cancellation is implemented for GitHub only. GitLab is excluded today
+	// because its parser never sets TriggerLabel, but guard explicitly so a
+	// future parser change cannot route other providers into this path.
+	if event.Provider != taskpkg.ProviderGitHub {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, `{"ignored":true,"reason":"cancellation is only supported for GitHub"}`+"\n")
+		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: cancel ignored for %s issue #%d: provider not supported\n",
+			event.Provider, event.IssueNumber)
+		return
+	}
 	ns := opts.Namespace
 	if ns == "" {
 		ns = "default"

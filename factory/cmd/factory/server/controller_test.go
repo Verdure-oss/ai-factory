@@ -68,9 +68,9 @@ func TestResolveMaxConcurrentTasks(t *testing.T) {
 
 func TestIsTaskQueued(t *testing.T) {
 	cases := []struct {
-		name string
+		name   string
 		status taskpkg.FactoryTaskStatus
-		want  bool
+		want   bool
 	}{
 		{
 			name:   "empty status",

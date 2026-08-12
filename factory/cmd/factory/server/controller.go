@@ -38,8 +38,8 @@ type factoryTaskList struct {
 
 // taskTracker tracks which tasks are currently being processed.
 type taskTracker struct {
-	mu       sync.Mutex
-	running  map[string]bool
+	mu      sync.Mutex
+	running map[string]bool
 }
 
 func newTaskTracker() *taskTracker {
