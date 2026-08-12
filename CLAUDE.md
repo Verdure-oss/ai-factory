@@ -111,7 +111,7 @@ AGENT_COMMAND="ai-factory-agent codex"
 
 - `AGENTS.md`: Agent 工作指令和项目状态（AI 应首先阅读）
 - `SOUL.md`: 项目核心原则和目标
-- `docs/guide.md`: 完整的设置和使用指南
+- `docs/general/guide.md`: 完整的设置和使用指南
 - `specs/`: 详细的规范文档
 - `plans/`: 执行计划文档
 

@@ -31,6 +31,11 @@ from agent_config import (
     InvalidAgentConfiguration,
     load_config,
 )
+from agent_images import (
+    build_user_content,
+    download_to_data_url,
+    extract_image_urls,
+)
 from script_validation import (
     SCRIPT_HEADER,
     RepairResponseError,
@@ -279,12 +284,20 @@ total_timeout_seconds = config.total_timeout_seconds
 exploration_request_timeout_seconds = config.exploration_request_timeout_seconds
 final_request_timeout_seconds = config.final_request_timeout_seconds
 repair_request_timeout_seconds = config.repair_request_timeout_seconds
+vision_enabled = config.vision_enabled
 execution_deadline = ExecutionDeadline(total_timeout_seconds)
 with open(required_env("AI_FACTORY_PROMPT_FILE"), "r", encoding="utf-8") as prompt_handle:
     prompt = prompt_handle.read()
 if not prompt.strip():
     print("FactoryTask prompt on stdin is empty", file=sys.stderr)
     sys.exit(2)
+
+# Extract image URLs from the prompt and attach them as image_url content
+# blocks so a multimodal model can read issue screenshots. When vision is
+# disabled (OPENAI_VISION_ENABLED=false) the user content stays a plain string
+# with image URLs embedded as text, matching the original text-only path.
+image_urls = extract_image_urls(prompt) if vision_enabled else []
+user_content = build_user_content(prompt, image_urls)
 
 system_prompt = """You are running inside an ai-factory sandbox.
 Return only a POSIX shell script. Do not wrap it in Markdown.
@@ -303,7 +316,7 @@ ai-factory will run validation, commit, push, and create the change request afte
 """
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": prompt},
+    {"role": "user", "content": user_content},
 ]
 tools = [
     {
@@ -381,6 +394,10 @@ tool_budget = PhaseRoundBudget(
     max_tool_rounds,
     "ToolRoundsExhausted",
 )
+# Bounded single retry: if the first request fails and the prompt has images,
+# embed any images that download in the sandbox as base64 data URLs and retry
+# once, in case the provider cannot reach the original image URL.
+base64_fallback_tried = False
 while not script:
     try:
         tool_round = tool_budget.next_round()
@@ -391,18 +408,46 @@ while not script:
         )
         break
 
-    payload = request_model(
-        {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "tools": tools,
-            "tool_choice": "auto",
-        },
-        "tool-exploration",
-        exploration_request_timeout_seconds,
-    )
+    request = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+    try:
+        payload = request_model(
+            request,
+            "tool-exploration",
+            exploration_request_timeout_seconds,
+            exit_on_error=False,
+        )
+    except AgentBudgetError:
+        if image_urls and not base64_fallback_tried:
+            base64_fallback_tried = True
+            embedded = {url: download_to_data_url(url) for url in image_urls}
+            if any(embedded.values()):
+                messages[1] = {
+                    "role": "user",
+                    "content": build_user_content(prompt, image_urls, embedded),
+                }
+                print(
+                    "OpenAI-compatible request failed with image URLs; "
+                    "retrying with base64-embedded images",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "OpenAI-compatible request failed with image URLs; "
+                    "could not download images, retrying original request",
+                    file=sys.stderr,
+                )
+        payload = request_model(
+            request,
+            "tool-exploration",
+            exploration_request_timeout_seconds,
+        )
     choice, message, content, tool_calls = parse_model_message(
         payload,
         "tool-exploration",
@@ -576,7 +621,10 @@ def request_repair(round_number, round_limit, repair_prompt):
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
+                # Use the multimodal user content so a repair round still sees
+                # issue images; falls back to the plain prompt when vision is
+                # disabled or there are no images.
+                {"role": "user", "content": user_content},
                 {"role": "user", "content": repair_prompt},
             ],
             "tool_choice": "none",

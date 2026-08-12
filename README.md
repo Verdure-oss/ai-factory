@@ -22,7 +22,7 @@ issue comments, and PR/MR creation. A permanent Kubernetes cluster is optional;
 it is only needed for a shared, always-on runtime or high task volume.
 
 The step-by-step setup for both providers is in
-docs/guide.md.
+docs/general/guide.md.
 
 ## Repository structure
 
@@ -95,7 +95,7 @@ For a long-running local controller:
     go run ./factory/cmd/factory task controller watch --namespace default
 
 The full provider setup, secrets, labels, runner prerequisites, and
-troubleshooting steps are in docs/guide.md and
+troubleshooting steps are in docs/general/guide.md and
 components/factory-task/README.md.
 
 ## GitHub issue tasks
@@ -111,7 +111,7 @@ Use these labels:
 - ai-factory-smoke: runs the safe smoke change-request flow.
 
 Configure the API key as a repository secret and provider settings as repository
-variables. See docs/guide.md for the exact GitHub UI steps.
+variables. See docs/general/guide.md for the exact GitHub UI steps.
 
 ## GitLab issue tasks
 
@@ -122,7 +122,7 @@ request after successful validation.
 
 Set AI_FACTORY_ISSUE_IID when a pipeline is started for an Issue. Set
 AI_FACTORY_SOURCE_URL when the target project consumes ai-factory from a
-separate GitLab mirror or repository. See docs/guide.md for protected
+separate GitLab mirror or repository. See docs/general/guide.md for protected
 variables, runner tags, webhook routing, and the required Docker privileges.
 
 ## Development

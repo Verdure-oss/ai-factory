@@ -87,37 +87,16 @@ func Reconcile(task *FactoryTask) (*ReconcileOutput, error) {
 			},
 		},
 	}
-	if task.Spec.ChangeRequest.Enabled && plan.GitAuthTokenEnv != "" {
-		if token := ReadConfig(plan.GitAuthTokenEnv); token != "" {
-			appendSandboxEnv(claim.Spec, plan.ContainerName, plan.GitAuthTokenEnv, token)
-		}
-	}
-	for _, envName := range task.Spec.Agent.Env {
-		if value := ReadConfig(envName); value != "" {
-			appendSandboxEnv(claim.Spec, plan.ContainerName, envName, value)
-		}
-	}
-	// Inject git proxy if configured (used by plan step "configure git proxy")
-	if proxy := ReadConfig("AI_FACTORY_GIT_PROXY"); proxy != "" {
-		appendSandboxEnv(claim.Spec, plan.ContainerName, "AI_FACTORY_GIT_PROXY", proxy)
-	}
+	// Runtime config (GITHUB_TOKEN, OPENAI_*, AI_FACTORY_GIT_PROXY, ...) is now
+	// loaded at go-dev creation time via envFrom on the SandboxTemplate, so the
+	// claim no longer carries env. Keeping claim.spec.env empty lets the standard
+	// agent-sandbox controller adopt warm pool pods (go-dev-*) instead of creating
+	// a fresh independently-named pod per task.
 
 	return &ReconcileOutput{
 		Plan:         plan,
 		SandboxClaim: claim,
 	}, nil
-}
-
-func appendSandboxEnv(spec map[string]interface{}, containerName, name, value string) {
-	env := map[string]interface{}{
-		"name":  name,
-		"value": value,
-	}
-	if containerName != "" {
-		env["containerName"] = containerName
-	}
-	envs, _ := spec["env"].([]interface{})
-	spec["env"] = append(envs, env)
 }
 
 // SandboxClaimYAML renders the generated SandboxClaim manifest.

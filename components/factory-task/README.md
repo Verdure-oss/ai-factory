@@ -1,7 +1,7 @@
 # FactoryTask runtime
 
 For the complete GitHub Actions + kind and GitLab Runner + kind setup, see
-docs/guide.md.
+docs/general/guide.md.
 
 `components/factory-task/install` always installs the `FactoryTask` CRD. Set
 `INSTALL_FACTORY_TASK_RUNTIME=true` to also deploy the runtime controllers:

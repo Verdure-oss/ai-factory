@@ -57,6 +57,7 @@ kubectl logs -f deployment/ai-factory-server -n ai-factory
 
 - 配置 GitHub Webhook → [详细部署指南](self-hosted-deployment-guide.md#配置-github-webhook)
 - 修改配置 → [热更新配置](self-hosted-deployment-guide.md#热更新配置)
+- 向公共仓库提 PR → [Fork PR 工作流](self-hosted-deployment-guide.md#fork-pr-工作流向公共仓库提-pr)
 - 遇到问题 → [故障排查指南](self-hosted-troubleshooting.md)
 
 ## 常用命令

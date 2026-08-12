@@ -40,6 +40,12 @@ spec:
         - --task-timeout={{ .Values.taskTimeout }}
         - --change-request={{ .Values.changeRequestEnabled }}
         - --report={{ .Values.reportEnabled }}
+        {{- if .Values.github.forkOwner }}
+        - --fork-owner={{ .Values.github.forkOwner }}
+        {{- end }}
+        {{- range .Values.github.repositoryAllowList }}
+        - --repository={{ . }}
+        {{- end }}
         - --agent-env=CODEX_API_KEY
         - --agent-env=OPENAI_API_KEY
         - --agent-env=OPENAI_BASE_URL
@@ -53,6 +59,10 @@ spec:
         - --agent-env=OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS
         - --agent-env=OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS
         - --agent-env=OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS
+        - --agent-env=OPENAI_VISION_ENABLED
+        env:
+        - name: MAX_CONCURRENT_TASKS
+          value: "{{ .Values.server.maxConcurrentTasks }}"
         ports:
         - containerPort: 8080
           name: http

@@ -40,6 +40,7 @@ class AgentConfiguration:
         exploration_request_timeout_seconds,
         final_request_timeout_seconds,
         repair_request_timeout_seconds,
+        vision_enabled,
     ):
         self.api_key = api_key
         self.base_url = base_url
@@ -53,6 +54,7 @@ class AgentConfiguration:
         self.exploration_request_timeout_seconds = exploration_request_timeout_seconds
         self.final_request_timeout_seconds = final_request_timeout_seconds
         self.repair_request_timeout_seconds = repair_request_timeout_seconds
+        self.vision_enabled = vision_enabled
 
 
 DEFAULTS = {
@@ -67,6 +69,7 @@ DEFAULTS = {
     "OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS": "180",
     "OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS": "90",
     "OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS": "90",
+    "OPENAI_VISION_ENABLED": "true",
 }
 
 
@@ -106,6 +109,17 @@ def _parse_positive_float(name, raw):
             f"{name} must be greater than zero, got {value}"
         )
     return value
+
+
+def _parse_bool(name, raw):
+    value = raw.strip().lower()
+    if value in ("true", "1", "yes", "on"):
+        return True
+    if value in ("false", "0", "no", "off"):
+        return False
+    raise InvalidAgentConfiguration(
+        f"{name} must be a boolean (true/false), got {raw}"
+    )
 
 
 def _validate_base_url(name, value):
@@ -189,6 +203,12 @@ def load_config(environ=None):
             DEFAULTS["OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS"],
         ).strip(),
     )
+    vision_enabled = _parse_bool(
+        "OPENAI_VISION_ENABLED",
+        environ.get(
+            "OPENAI_VISION_ENABLED", DEFAULTS["OPENAI_VISION_ENABLED"]
+        ).strip(),
+    )
 
     return AgentConfiguration(
         api_key=api_key,
@@ -203,4 +223,5 @@ def load_config(environ=None):
         exploration_request_timeout_seconds=exploration_request_timeout_seconds,
         final_request_timeout_seconds=final_request_timeout_seconds,
         repair_request_timeout_seconds=repair_request_timeout_seconds,
+        vision_enabled=vision_enabled,
     )

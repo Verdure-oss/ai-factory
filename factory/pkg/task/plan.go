@@ -275,7 +275,16 @@ func commitChangesScript(workDir, commitMessage, authorName, authorEmail string)
 }
 
 func pushChangeBranchScript(workDir, remoteName, branchName, targetBranch string) string {
-	return fmt.Sprintf("cd %s && if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse %s)\" ]; then echo 'No change branch push needed'; else git -c http.version=HTTP/1.1 push --force-with-lease -u %s %s; fi", shellQuote(workDir), shellQuote(targetBranch), shellQuote(remoteName), shellQuote(branchName))
+	// Use a plain --force push, not --force-with-lease. The change branch is
+	// always regenerated from the latest base ref (never edited incrementally
+	// or merged with remote history), and the branch name is deterministic per
+	// issue (factory-task/<repo>-<issue>). In that model the lease check of
+	// --force-with-lease becomes unreliable: on a fresh shallow clone that only
+	// fetches the base ref, the remote-tracking ref for the change branch is
+	// absent, so a re-run reports a bogus "stale info" rejection. --force
+	// handles both the first push (creates the branch) and re-runs (overwrites
+	// it, updating the same PR) without requiring a lease.
+	return fmt.Sprintf("cd %s && if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse %s)\" ]; then echo 'No change branch push needed'; else git -c http.version=HTTP/1.1 push --force -u %s %s; fi", shellQuote(workDir), shellQuote(targetBranch), shellQuote(remoteName), shellQuote(branchName))
 }
 
 func runAgentScript(workDir, instructions, promptRef, agentCommand string) string {

@@ -23,6 +23,12 @@ import (
 	"testing"
 )
 
+// normalizeOutput normalizes path separators so the hardcoded forward-slash
+// expectations also match on Windows (where filepath.Join emits backslashes).
+func normalizeOutput(output string) string {
+	return strings.ReplaceAll(output, string(filepath.Separator), "/")
+}
+
 func copyDir(src string, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -80,7 +86,7 @@ func TestValidateSpec_Success(t *testing.T) {
 		t.Fatalf("Command failed: %v", err)
 	}
 
-	output := out.String()
+	output := normalizeOutput(out.String())
 	t.Logf("Output:\n%s", output)
 
 	expectedLogs := []string{
@@ -123,7 +129,7 @@ func TestValidateSpec_Failure(t *testing.T) {
 		t.Fatal("Expected command to fail, but it succeeded")
 	}
 
-	output := out.String()
+	output := normalizeOutput(out.String())
 	t.Logf("Output:\n%s", output)
 
 	if !strings.Contains(output, "--- FAIL: validate specs/c.md") {
@@ -159,7 +165,7 @@ func TestValidateSpec_NameMismatch(t *testing.T) {
 		t.Fatal("Expected command to fail, but it succeeded")
 	}
 
-	output := out.String()
+	output := normalizeOutput(out.String())
 	t.Logf("Output:\n%s", output)
 
 	if !strings.Contains(output, "name in frontmatter (\"wrong-name\") does not match filename (\"a\")") {

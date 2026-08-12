@@ -35,22 +35,23 @@ This document summarizes the changes made to implement the ai-factory self-hoste
   - Stage 2: Minimal runtime with kubectl
   - ~50MB final image size
 
-### 3. Kubernetes Manifests (`k8s/`)
+### 3. Helm Chart (`charts/ai-factory/`)
 
-- `namespace.yaml` - Creates `ai-factory` namespace
-- `secret.yaml` - Credentials template (GITHUB_TOKEN, WEBHOOK_SECRET, OPENAI_API_KEY)
-- `serviceaccount.yaml` - ServiceAccount for the server
-- `rbac.yaml` - ClusterRole/ClusterRoleBinding for pod and sandbox management
-- `deployment.yaml` - Server Deployment with health checks
-- `service.yaml` - ClusterIP Service
-- `ingress.yaml` - Ingress configuration (template)
-- `sandbox-warm-pool.yaml` - SandboxTemplate and SandboxWarmPool for coding agent
-- `install.sh` - Automated installation script
-- `README.md` - Deployment documentation
+> 注:早期实现曾用 `k8s/` 目录存放原始 Kubernetes 清单,现已废弃并移除,统一改用 Helm chart。
+
+- `templates/namespace.yaml` - Creates `ai-factory` namespace
+- `templates/secret.yaml` - Credentials template (GITHUB_TOKEN, WEBHOOK_SECRET, OPENAI_API_KEY)
+- `templates/serviceaccount.yaml` - ServiceAccount for the server
+- `templates/rbac.yaml` - ClusterRole/ClusterRoleBinding for pod and sandbox management
+- `templates/deployment.yaml` - Server Deployment with health checks
+- `templates/service.yaml` - ClusterIP Service
+- `templates/ingress.yaml` - Ingress configuration (template)
+- `templates/sandbox-warm-pool.yaml` - SandboxTemplate and SandboxWarmPool for coding agent
+- `values.yaml` - Chart values (image, resources, credentials, model config)
 
 ### 4. Documentation
 
-- `docs/self-hosted-service-setup.md` - Comprehensive setup guide
+- `docs/self-hosted-deployment-guide.md` - Comprehensive setup guide (Chinese)
 
 ## Modified Files
 
@@ -115,8 +116,9 @@ go run ./factory/cmd/factory server --addr :8080
 # Build image
 docker build -t ai-factory-server:latest -f Dockerfile.server .
 
-# Deploy to K8s
-./k8s/install.sh
+# Deploy to K8s (via Helm chart)
+./scripts/package.sh        # build images + package chart
+./scripts/deploy-remote.sh  # install/upgrade via helm
 ```
 
 ### Trigger Tasks

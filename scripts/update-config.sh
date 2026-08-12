@@ -58,6 +58,7 @@ CONFIG_KEYS=("OPENAI_BASE_URL" "OPENAI_MODEL" "OPENAI_TEMPERATURE" "OPENAI_MAX_T
              "OPENAI_MAX_TOOL_ROUNDS" "OPENAI_MAX_FINAL_SCRIPT_ROUNDS" "OPENAI_MAX_REPAIR_ROUNDS"
              "OPENAI_TOTAL_TIMEOUT_SECONDS" "OPENAI_EXPLORATION_REQUEST_TIMEOUT_SECONDS"
              "OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS" "OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS"
+             "OPENAI_VISION_ENABLED"
              "AI_FACTORY_GIT_PROXY")
 
 # 构建 Secret --from-literal 参数
@@ -104,6 +105,21 @@ echo ""
 echo "✅ 配置更新完成！"
 echo ""
 echo "📌 K8s 会在 ~30s 内自动同步文件到 Pod，无需重启。"
-echo "📌 验证方法: 触发新 issue，然后检查 SandboxClaim 的 env:"
+
+# 重建 go-dev 预热 pod，使新配置生效。
+# go-dev pod 通过 envFrom 引用 secret/configmap，env 是 pod 创建时的快照，
+# 运行中的 pod 不会自动刷新，必须重建才能加载新配置。agent-sandbox 会自动补建。
+# 注意: 若某个 go-dev 正在被任务绑定，删除会中断该任务。
+echo ""
+echo "🧹 重建 go-dev 预热 pod（使新配置生效）..."
+WARM_PODS=$(kubectl get pods -n "${NAMESPACE}" -l agents.x-k8s.io/warm-pool-sandbox -o name 2>/dev/null || true)
+if [ -n "${WARM_PODS}" ]; then
+    echo "${WARM_PODS}" | xargs kubectl delete -n "${NAMESPACE}" 2>/dev/null || true
+    echo "   ✓ go-dev 预热 pod 已删除，agent-sandbox 将用新配置补建"
+else
+    echo "   ⚠ 未找到 go-dev 预热 pod，跳过"
+fi
+echo ""
+echo "📌 验证方法: 触发新 issue，然后检查任务绑定的 sandbox 是否为 go-dev（而非独立的 claim pod）:"
 echo "   kubectl get sandboxclaims -n ${NAMESPACE} --sort-by=.metadata.creationTimestamp \\"
-echo "       -o jsonpath='{.items[-1].spec.template.spec.containers[0].env}' | python3 -m json.tool"
+echo "       -o jsonpath='{.items[-1].status.sandbox.name}'"
