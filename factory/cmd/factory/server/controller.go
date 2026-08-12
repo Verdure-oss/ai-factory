@@ -276,8 +276,7 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	// Cancellation guard: the task may have been deleted (trigger label removed)
 	// while we waited for the sandbox to become ready. Abort quietly instead of
 	// running the plan — the cancellation path already cleaned up labels.
-	if !factoryTaskExists(namespace, task.Metadata.Name) {
-		fmt.Fprintf(out, "--- CANCELLED: task %s deleted while waiting for sandbox\n", task.Metadata.Name)
+	if taskCancelled(out, namespace, task.Metadata.Name) {
 		return nil
 	}
 
@@ -420,6 +419,19 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	return nil
 }
 
+// taskCancelled reports whether the FactoryTask was deleted (trigger label
+// removed) while waiting for the sandbox to become ready. When cancelled it
+// logs the cancellation and returns true; the caller must abort without doing
+// any further work on the task — the cancellation path already cleaned up
+// labels and posted its own comment.
+func taskCancelled(out io.Writer, namespace, name string) bool {
+	if taskExists(namespace, name) {
+		return false
+	}
+	fmt.Fprintf(out, "--- CANCELLED: task %s deleted while waiting for sandbox\n", name)
+	return true
+}
+
 func createTaskChangeRequest(task *taskpkg.FactoryTask) (string, bool, error) {
 	if !opts.EnableChangeRequest || !task.Spec.ChangeRequest.Enabled {
 		return "", false, nil
@@ -456,6 +468,7 @@ func postStartedComment(task *taskpkg.FactoryTask) {
 		Provider:  reportingProvider(task),
 		TargetURL: task.Spec.Reporting.TargetURL,
 		Body:      body,
+		APIBase:   reportingAPIBase(task),
 	}); err != nil {
 		return
 	}
@@ -466,7 +479,7 @@ func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message s
 	// label), skip all reporting — the cancellation path already cleaned up labels
 	// and posted its own comment. Prevents a waiting goroutine whose claim was
 	// deleted mid-flight from misreporting failure.
-	if !factoryTaskExists(namespaceForTask(task), task.Metadata.Name) {
+	if !taskExists(namespaceForTask(task), task.Metadata.Name) {
 		return
 	}
 	// Always update labels regardless of comment reporting
@@ -482,6 +495,7 @@ func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message s
 		Provider:  reportingProvider(task),
 		TargetURL: task.Spec.Reporting.TargetURL,
 		Body:      body,
+		APIBase:   reportingAPIBase(task),
 	}); err != nil {
 		fmt.Fprintf(out, "--- REPORT FAILED: %v\n", err)
 		return
@@ -666,6 +680,17 @@ func reportingProvider(task *taskpkg.FactoryTask) string {
 	return task.Spec.Source.Provider
 }
 
+// reportingAPIBase returns the API base override for the task's reporting
+// provider, mirroring how NewGitHubClient honors GITHUB_API_BASE. It returns
+// "" when the provider has no override configured, in which case
+// PostIssueComment uses the provider default.
+func reportingAPIBase(task *taskpkg.FactoryTask) string {
+	if reportingProvider(task) == taskpkg.ProviderGitHub {
+		return taskpkg.ReadConfig("GITHUB_API_BASE")
+	}
+	return ""
+}
+
 func patchTaskStatus(namespace, name string, opts taskpkg.StatusPatchOptions) error {
 	patch, err := taskpkg.StatusMergePatch(opts)
 	if err != nil {
@@ -685,6 +710,11 @@ func listFactoryTasks(namespace string) ([]taskpkg.FactoryTask, error) {
 	}
 	return list.Items, nil
 }
+
+// taskExists is the seam the cancellation guards use to check whether a
+// FactoryTask still exists. Tests override it to simulate cancellation
+// without a live cluster.
+var taskExists = factoryTaskExists
 
 func factoryTaskExists(namespace, name string) bool {
 	_, err := kubectlOutput("get", "factorytask", name, "-n", namespace)

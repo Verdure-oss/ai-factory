@@ -15,6 +15,9 @@
 package server
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	taskpkg "github.com/ai-on-gke/ai-factory/factory/pkg/task"
@@ -105,6 +108,128 @@ func TestIsTaskQueued(t *testing.T) {
 			task := &taskpkg.FactoryTask{Status: tc.status}
 			if got := isTaskQueued(task); got != tc.want {
 				t.Fatalf("isTaskQueued() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// newGitHubReportTask builds a minimal GitHub-sourced FactoryTask configured
+// for comment reporting, as used by the reportTaskResult tests.
+func newGitHubReportTask() *taskpkg.FactoryTask {
+	return &taskpkg.FactoryTask{
+		Metadata: taskpkg.ObjectMeta{
+			Name:      "github-owner-repo-42",
+			Namespace: "default",
+		},
+		Spec: taskpkg.FactoryTaskSpec{
+			Source: taskpkg.SourceSpec{
+				Provider:   taskpkg.ProviderGitHub,
+				Repository: "owner/repo",
+			},
+			Trigger: taskpkg.TriggerSpec{
+				ID: "42",
+			},
+			Reporting: taskpkg.ReportingSpec{
+				Mode:      "comment",
+				TargetURL: "https://github.com/owner/repo/issues/42",
+			},
+		},
+	}
+}
+
+// withTaskExists overrides the taskExists seam for the duration of the test.
+func withTaskExists(t *testing.T, exists bool) {
+	t.Helper()
+	orig := taskExists
+	taskExists = func(namespace, name string) bool { return exists }
+	t.Cleanup(func() { taskExists = orig })
+}
+
+// withReportEnabled pins opts.ReportEnabled for the duration of the test.
+func withReportEnabled(t *testing.T, enabled bool) {
+	t.Helper()
+	orig := opts.ReportEnabled
+	opts.ReportEnabled = enabled
+	t.Cleanup(func() { opts.ReportEnabled = orig })
+}
+
+func TestReportTaskResultSkipsReportingWhenTaskDeleted(t *testing.T) {
+	server, ops, comments := fakeGitHubAPI(t, []string{"ai-factory-running", "ai-factory-waiting"})
+	defer server.Close()
+
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+	t.Setenv("GITHUB_API_BASE", server.URL)
+	withTaskExists(t, false)
+	withReportEnabled(t, true)
+
+	var out bytes.Buffer
+	reportTaskResult(&out, newGitHubReportTask(), taskpkg.PhaseFailed, "SandboxClaim ready wait failed: claim deleted")
+
+	if len(*ops) != 0 {
+		t.Errorf("deleted task: expected no label ops, got %d: %+v", len(*ops), *ops)
+	}
+	if len(*comments) != 0 {
+		t.Errorf("deleted task: expected no comments, got %d: %q", len(*comments), *comments)
+	}
+}
+
+func TestReportTaskResultReportsWhenTaskExists(t *testing.T) {
+	server, ops, comments := fakeGitHubAPI(t, []string{"ai-factory-running"})
+	defer server.Close()
+
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+	t.Setenv("GITHUB_API_BASE", server.URL)
+	withTaskExists(t, true)
+	withReportEnabled(t, true)
+
+	var out bytes.Buffer
+	reportTaskResult(&out, newGitHubReportTask(), taskpkg.PhaseFailed, "SandboxClaim ready wait failed: claim deleted")
+
+	if len(*comments) == 0 {
+		t.Fatal("existing task: expected at least one report comment, got none")
+	}
+	if len(*ops) == 0 {
+		t.Error("existing task: expected label ops, got none")
+	}
+}
+
+func TestTaskCancelled(t *testing.T) {
+	withTaskExists(t, false)
+	var out bytes.Buffer
+	if !taskCancelled(&out, "default", "github-owner-repo-42") {
+		t.Fatal("taskCancelled() = false when task deleted, want true")
+	}
+	if !strings.Contains(out.String(), "--- CANCELLED") {
+		t.Errorf("expected --- CANCELLED log line when task deleted, got %q", out.String())
+	}
+
+	out.Reset()
+	withTaskExists(t, true)
+	if taskCancelled(&out, "default", "github-owner-repo-42") {
+		t.Fatal("taskCancelled() = true when task exists, want false")
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected no output when task exists, got %q", out.String())
+	}
+}
+
+func TestIsNotFoundError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"NotFound from kubectl", fmt.Errorf("kubectl get factorytask github-owner-repo-42 -n default: Error from server (NotFound): factorytasks.factory.ai.gke.io \"github-owner-repo-42\" not found: exit status 1"), true},
+		{"lowercase not found", fmt.Errorf("sandboxclaims.agent.k8s.io \"claim\" not found"), true},
+		{"wrapped NotFound", fmt.Errorf("some prefix: NotFound: some suffix"), true},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"timeout error", fmt.Errorf("context deadline exceeded"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNotFoundError(tt.err); got != tt.want {
+				t.Errorf("isNotFoundError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
