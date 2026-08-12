@@ -185,6 +185,14 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 			return
 		}
 
+		// Handle cancellation: removing a trigger label (ai-factory-run / ai-factory-smoke)
+		// from a waiting issue cancels its background task. Must intercept before the
+		// create flow, which would ignore unlabeled events.
+		if event.Action == "unlabeled" && isTriggerLabel(event.TriggerLabel) {
+			handleIssueCancel(w, cmd, event)
+			return
+		}
+
 		// Determine if this is a smoke test
 		isSmoke := false
 		for _, label := range event.Labels {
@@ -289,6 +297,48 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 		fmt.Fprintf(w, `{"triggered":true,"task":"%s","namespace":"%s","existingPhase":"%s"}`+"\n",
 			name, ns, existingPhase)
 	}
+}
+
+// handleIssueCancel cancels a waiting FactoryTask when its trigger label is removed.
+// The claim label value below relies on the task name being already DNS-safe:
+// SandboxClaim labels use dnsLabel(task.Metadata.Name), which is a no-op on
+// dnsName output, so the raw name is a valid label selector value.
+func handleIssueCancel(w http.ResponseWriter, cmd *cobra.Command, event *taskpkg.IssueWebhookEvent) {
+	ns := opts.Namespace
+	if ns == "" {
+		ns = "default"
+	}
+	name := taskpkg.FactoryTaskName(event.Provider, event.Repository, event.IssueNumber)
+	phase := getFactoryTaskPhase(ns, name)
+	if !isWaitingPhase(phase) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, `{"ignored":true,"reason":"task not waiting (phase=%q)"}`+"\n", phase)
+		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: cancel ignored for %s issue #%d: task %s phase=%q\n",
+			event.Provider, event.IssueNumber, name, phase)
+		return
+	}
+
+	// Release any warm pool pod tied up by the waiting task's claim.
+	_ = runKubectl(nil, "delete", "sandboxclaim", "-l", "factory.ai.gke.io/task="+name, "-n", ns, "--ignore-not-found")
+	// Remove the task so the controller stops reconciling it.
+	if err := runKubectl(nil, "delete", "factorytask", name, "-n", ns, "--ignore-not-found"); err != nil {
+		http.Error(w, fmt.Sprintf("delete FactoryTask: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Clean up GitHub labels and leave a record of the cancellation.
+	if event.Provider == taskpkg.ProviderGitHub {
+		gh := NewGitHubClient()
+		if gh.HasToken() {
+			_ = gh.SetTaskCancelled(context.Background(), event.Repository, event.IssueNumber, event.TriggerLabel)
+		}
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue #%d cancelled: FactoryTask %s/%s removed (label %s removed)\n",
+		event.Provider, event.IssueNumber, ns, name, event.TriggerLabel)
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"cancelled":true,"task":"%s","namespace":"%s"}`+"\n", name, ns)
 }
 
 func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
@@ -410,4 +460,21 @@ func isTerminalPhase(phase string) bool {
 // This happens when concurrent webhook requests race to create the same resource.
 func isAlreadyExistsError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "AlreadyExists")
+}
+
+// isTriggerLabel reports whether a label is a trigger label whose removal
+// should cancel a waiting task.
+func isTriggerLabel(label string) bool {
+	return label == labelRun || label == labelSmoke
+}
+
+// isWaitingPhase reports whether a FactoryTask is still waiting for a sandbox
+// (either queued behind the concurrency gate or waiting for its claim).
+func isWaitingPhase(phase string) bool {
+	return phase == taskpkg.PhasePending || phase == taskpkg.PhaseClaimCreated
+}
+
+// cancelCommentBody builds the GitHub comment posted when a task is cancelled.
+func cancelCommentBody(issueNumber int, removedTriggerLabel string) string {
+	return fmt.Sprintf("ai-factory 已取消 #%d：触发标签 %s 被移除（任务尚未开始执行）", issueNumber, removedTriggerLabel)
 }
