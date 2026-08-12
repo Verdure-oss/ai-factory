@@ -688,7 +688,16 @@ func listFactoryTasks(namespace string) ([]taskpkg.FactoryTask, error) {
 
 func factoryTaskExists(namespace, name string) bool {
 	_, err := kubectlOutput("get", "factorytask", name, "-n", namespace)
-	return err == nil
+	if err == nil {
+		return true
+	}
+	if isNotFoundError(err) {
+		return false
+	}
+	// Transient error (API-server blip, kubectl failure): conservatively
+	// treat the task as still existing so the cancellation guards remain
+	// no-ops and a healthy task is not silently dropped.
+	return true
 }
 
 func namespaceForTask(task *taskpkg.FactoryTask) string {
@@ -803,6 +812,13 @@ func waitForSandboxClaimReady(namespace, name string, timeout time.Duration) err
 		if err == nil && strings.TrimSpace(output) == "True" {
 			return nil
 		}
+		if isNotFoundError(err) {
+			// The claim was deleted out from under us (e.g. its task was
+			// cancelled while waiting). Fail fast instead of polling until
+			// the timeout so the caller's failure path runs promptly.
+			return fmt.Errorf("SandboxClaim %s/%s no longer exists: %v", namespace, name, err)
+		}
+		// Not Ready yet, or a transient error (API-server blip): keep polling.
 		time.Sleep(pollInterval)
 	}
 	return fmt.Errorf("timeout waiting for SandboxClaim %s/%s to be Ready after %v", namespace, name, timeout)

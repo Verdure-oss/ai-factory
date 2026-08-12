@@ -462,6 +462,18 @@ func isAlreadyExistsError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "AlreadyExists")
 }
 
+// isNotFoundError returns true if the error is a Kubernetes NotFound error,
+// e.g. kubectl reporting that the resource does not exist. It mirrors
+// isAlreadyExistsError by matching the server error text, so transient
+// API-server errors (connection refused, timeouts) do not match.
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "NotFound") || strings.Contains(message, "not found")
+}
+
 // isTriggerLabel reports whether a label is a trigger label whose removal
 // should cancel a waiting task.
 func isTriggerLabel(label string) bool {
