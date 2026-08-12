@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,13 +73,14 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 		namespace = "default"
 	}
 
-	// Concurrency gate: at most opts.MaxConcurrentTasks tasks execute at once.
+	// Concurrency gate: at most maxConcurrent tasks execute at once.
 	// Tasks beyond the limit are marked queued (ai-factory-waiting) in their own
 	// poll cycle and retried until a slot frees up. maxConcurrent <= 0 disables
 	// the gate (unlimited).
+	maxConcurrent := resolveMaxConcurrentTasks(cmd)
 	var sem chan struct{}
-	if opts.MaxConcurrentTasks > 0 {
-		sem = make(chan struct{}, opts.MaxConcurrentTasks)
+	if maxConcurrent > 0 {
+		sem = make(chan struct{}, maxConcurrent)
 	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "controller starting, watching namespace %s\n", namespace)
@@ -132,6 +134,28 @@ func startControllerLoop(ctx context.Context, cmd *cobra.Command) error {
 		time.Sleep(opts.WatchInterval)
 	}
 }
+
+// resolveMaxConcurrentTasks resolves the concurrency limit with the following
+// precedence:
+//  1. --max-concurrent-tasks flag (when explicitly set),
+//  2. MAX_CONCURRENT_TASKS environment variable,
+//  3. default 2.
+//
+// A resolved value <= 0 means unlimited (no gate).
+func resolveMaxConcurrentTasks(cmd *cobra.Command) int {
+	if cmd.Flags().Changed("max-concurrent-tasks") {
+		return opts.MaxConcurrentTasks
+	}
+	if v := os.Getenv("MAX_CONCURRENT_TASKS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return maxConcurrentTasksDefault
+}
+
+// maxConcurrentTasksDefault is used when neither the flag nor the env var is set.
+const maxConcurrentTasksDefault = 2
 
 // markTaskQueued idempotently marks a FactoryTask as queued (Pending + Queued
 // reason) when the concurrency gate is full, and sets the ai-factory-waiting

@@ -64,10 +64,12 @@
 
 | 文件 | 改动 |
 |---|---|
-| `factory/cmd/factory/server/server.go` | `Options` 加 `MaxConcurrentTasks`；flags 加 `--max-concurrent-tasks`（默认 2，0=不限） |
-| `factory/cmd/factory/server/controller.go` | `startControllerLoop` 用 buffered channel 信号量限流；满时任务标记 `Pending` + `Queued`，打 `ai-factory-waiting` 标签，下个轮询周期再试 |
+| `factory/cmd/factory/server/server.go` | `Options` 加 `MaxConcurrentTasks`；flags 加 `--max-concurrent-tasks`（默认 0，0=不限） |
+| `factory/cmd/factory/server/controller.go` | `startControllerLoop` 用 buffered channel 信号量限流；满时任务标记 `Pending` + `Queued`，打 `ai-factory-waiting` 标签，下个轮询周期再试；`resolveMaxConcurrentTasks` 按 flag → `MAX_CONCURRENT_TASKS` env → 默认 2 解析 |
 | `charts/ai-factory/values.yaml` | 加 `server.maxConcurrentTasks: 2` |
-| `charts/ai-factory/templates/deployment.yaml` | 加 `--max-concurrent-tasks={{ .Values.server.maxConcurrentTasks }}` |
+| `charts/ai-factory/templates/deployment.yaml` | 通过 env `MAX_CONCURRENT_TASKS` 注入（不传 flag），值来自 `server.maxConcurrentTasks` |
+
+**配置优先级**：`--max-concurrent-tasks` flag（显式设置时）→ `MAX_CONCURRENT_TASKS` 环境变量 → 默认 2。helm 部署走 env 注入，改 `server.maxConcurrentTasks` 后 `helm upgrade` 重启 server 生效。
 
 **使用建议**：`maxConcurrentTasks` 应 ≤ `sandbox.warmPoolReplicas`，这样正在执行的任务数量不会超过 go-dev 预热池能提供的 ready 实例，claim 始终能 adopt 预热池 go-dev，不会额外新建。
 

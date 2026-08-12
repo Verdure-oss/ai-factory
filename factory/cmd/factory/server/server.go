@@ -82,7 +82,7 @@ func init() {
 	Cmd.Flags().BoolVar(&opts.ReportEnabled, "report", true, "enable reporting comments")
 	Cmd.Flags().StringVar(&opts.ForkOwner, "fork-owner", "", "GitHub owner of the fork used for change requests; defaults to the authenticated token owner")
 	Cmd.Flags().StringArrayVar(&opts.Repositories, "repository", nil, "repository allowed to trigger FactoryTasks; can be repeated")
-	Cmd.Flags().IntVar(&opts.MaxConcurrentTasks, "max-concurrent-tasks", 2, "maximum number of tasks to execute concurrently; tasks beyond this are queued (0 = unlimited)")
+	Cmd.Flags().IntVar(&opts.MaxConcurrentTasks, "max-concurrent-tasks", 0, "maximum number of tasks to execute concurrently; tasks beyond this are queued (0 = unlimited; falls back to MAX_CONCURRENT_TASKS env, then default 2)")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {

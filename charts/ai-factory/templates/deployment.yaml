@@ -38,7 +38,6 @@ spec:
         - --sandbox-template=go-dev
         - --watch-interval={{ .Values.watchInterval }}
         - --task-timeout={{ .Values.taskTimeout }}
-        - --max-concurrent-tasks={{ .Values.server.maxConcurrentTasks }}
         - --change-request={{ .Values.changeRequestEnabled }}
         - --report={{ .Values.reportEnabled }}
         {{- if .Values.github.forkOwner }}
@@ -61,6 +60,9 @@ spec:
         - --agent-env=OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS
         - --agent-env=OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS
         - --agent-env=OPENAI_VISION_ENABLED
+        env:
+        - name: MAX_CONCURRENT_TASKS
+          value: "{{ .Values.server.maxConcurrentTasks }}"
         ports:
         - containerPort: 8080
           name: http
