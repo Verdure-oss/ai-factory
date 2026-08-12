@@ -119,6 +119,7 @@ HELM_ARGS=(
 [ -n "${OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.finalRequestTimeoutSeconds="${OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS}")
 [ -n "${OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.repairRequestTimeoutSeconds="${OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS}")
 [ -n "${AI_FACTORY_GIT_PROXY:-}" ] && HELM_ARGS+=(--set gitProxy="${AI_FACTORY_GIT_PROXY}")
+[ -n "${MAX_CONCURRENT_TASKS:-}" ] && HELM_ARGS+=(--set server.maxConcurrentTasks="${MAX_CONCURRENT_TASKS}")
 
 helm upgrade --install ai-factory "${CHART_PATH}" \
     --namespace "${NAMESPACE}" \
