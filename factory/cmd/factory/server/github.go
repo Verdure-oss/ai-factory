@@ -254,6 +254,18 @@ func (c *GitHubClient) SetTaskFailed(ctx context.Context, repo string, issueNumb
 	return nil
 }
 
+// SetTaskCancelled removes the running/waiting labels and posts a comment
+// explaining that the task was cancelled (trigger label removed before it ran).
+func (c *GitHubClient) SetTaskCancelled(ctx context.Context, repo string, issueNumber int, removedTriggerLabel string) error {
+	if !c.HasToken() {
+		return nil
+	}
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelRunning)
+	_ = c.RemoveLabel(ctx, repo, issueNumber, labelWaiting)
+	return c.PostComment(ctx, repo, issueNumber, fmt.Sprintf(
+		"ai-factory 已取消 #%d：触发标签 %s 被移除（任务尚未开始执行）", issueNumber, removedTriggerLabel))
+}
+
 func (c *GitHubClient) setHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
