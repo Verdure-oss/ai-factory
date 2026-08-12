@@ -383,7 +383,8 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	// CI feedback loop: after the PR is created, watch GitHub CI. On failure,
 	// collect annotations and repair in the reused sandbox, force-pushing the
 	// fix back to the same PR, until CI is green or the retry budget runs out.
-	if resultURL != "" && reportCIWatchEnabled() {
+	// GitHub-only: GitLab MR URLs have no /pull/N shape for watchAndRepairCI.
+	if resultURL != "" && reportCIWatchEnabled() && task.Spec.Source.Provider == taskpkg.ProviderGitHub {
 		fmt.Fprintf(out, "--- CI gathering check results for %s\n", resultURL)
 		outcome, summary := watchAndRepairCI(out, task, resultURL, NewGitHubClient(), ciRepairRunnerFor(task, namespace, sandboxName, resultURL), resolveCIWatchOptions())
 		if outcome != ciWatchGreen {
