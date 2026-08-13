@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -51,6 +52,10 @@ type Options struct {
 	ForkOwner           string
 	Repositories        []string
 	MaxConcurrentTasks  int
+	CIWatchEnabled      bool
+	CIWatchMaxRetries   int
+	CIWatchMaxWait      time.Duration
+	CIWatchSettleInterval time.Duration
 }
 
 // Cmd represents the server command.
@@ -83,6 +88,10 @@ func init() {
 	Cmd.Flags().StringVar(&opts.ForkOwner, "fork-owner", "", "GitHub owner of the fork used for change requests; defaults to the authenticated token owner")
 	Cmd.Flags().StringArrayVar(&opts.Repositories, "repository", nil, "repository allowed to trigger FactoryTasks; can be repeated")
 	Cmd.Flags().IntVar(&opts.MaxConcurrentTasks, "max-concurrent-tasks", 0, "maximum number of tasks to execute concurrently; tasks beyond this are queued (0 = unlimited; falls back to MAX_CONCURRENT_TASKS env, then default 2)")
+	Cmd.Flags().BoolVar(&opts.CIWatchEnabled, "ci-watch", true, "wait for GitHub CI on created PRs and repair failures (CI_WATCH_ENABLED overrides)")
+	Cmd.Flags().IntVar(&opts.CIWatchMaxRetries, "ci-watch-max-retries", 3, "max CI repair cycles before failing the task (CI_WATCH_MAX_RETRIES overrides)")
+	Cmd.Flags().DurationVar(&opts.CIWatchMaxWait, "ci-watch-max-wait", 30*time.Minute, "max time to wait for CI per cycle (CI_WATCH_MAX_WAIT overrides)")
+	Cmd.Flags().DurationVar(&opts.CIWatchSettleInterval, "ci-watch-settle-interval", 60*time.Second, "quiet window to wait for late-registering check runs after an event (CI_WATCH_SETTLE_INTERVAL overrides)")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -136,7 +145,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 func startWebhookServer(ctx context.Context, cmd *cobra.Command) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook/github", issueWebhookHandler(cmd, taskpkg.ProviderGitHub))
+	mux.HandleFunc("/webhook/github", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("X-GitHub-Event") {
+		case "check_suite", "check_run":
+			ciWebhookHandler(cmd)(w, r)
+		default:
+			issueWebhookHandler(cmd, taskpkg.ProviderGitHub)(w, r)
+		}
+	})
 	mux.HandleFunc("/webhook/gitlab", issueWebhookHandler(cmd, taskpkg.ProviderGitLab))
 	mux.HandleFunc("/healthz", healthHandler)
 
@@ -160,6 +176,87 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, `{"status":"ok"}`)
+}
+
+// ciWebhookHandler handles GitHub check_suite / check_run webhook events. It
+// extracts the repository + head branch, looks up the registered CI waiter for
+// (repo, branch), and wakes it so the watch loop's quiet-window timer resets.
+// The handler does no GitHub API calls and never blocks.
+func ciWebhookHandler(cmd *cobra.Command) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := readBody(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := verifyWebhook(taskpkg.ProviderGitHub, body, req); err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		eventType := req.Header.Get("X-GitHub-Event")
+		var owner, repo, branch string
+		if eventType == "check_suite" {
+			owner, repo, branch, _, err = parseCheckSuiteEvent(body)
+		} else {
+			owner, repo, branch, _, err = parseCheckRunEvent(body)
+		}
+		if err != nil || branch == "" {
+			// Ignore non-actionable events (created/in_progress, or events whose
+			// payload omits head_branch). Nothing to wake.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "ci webhook: %s event for %s/%s@%s\n", eventType, owner, repo, branch)
+		notifyWaiter(fmt.Sprintf("%s/%s/%s", owner, repo, branch))
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// ciEventRepoBranch extracts owner/repo/branch/headSHA shared by the two CI
+// parsers from a webhook payload skeleton.
+type ciEventPayload struct {
+	Action string `json:"action"`
+	CheckSuite struct {
+		HeadBranch string `json:"head_branch"`
+	} `json:"check_suite"`
+	CheckRun struct {
+		HeadSHA string `json:"head_sha"`
+	} `json:"check_run"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// parseCheckSuiteEvent returns owner, repo, and head_branch for a
+// check_suite event that completed; other actions are ignored.
+func parseCheckSuiteEvent(body []byte) (owner, repo, branch, headSHA string, err error) {
+	return parseCIEvent(body, true)
+}
+
+// parseCheckRunEvent returns owner, repo, and head_branch for a check_run
+// event. Any action restarts the quiet window (that is the point of notifying).
+func parseCheckRunEvent(body []byte) (owner, repo, branch, headSHA string, err error) {
+	return parseCIEvent(body, false)
+}
+
+func parseCIEvent(body []byte, suiteOnly bool) (owner, repo, branch, headSHA string, err error) {
+	var ev ciEventPayload
+	if err := json.Unmarshal(body, &ev); err != nil {
+		return "", "", "", "", err
+	}
+	// For check_suite events, only completed suites carry a verdict.
+	if suiteOnly && ev.Action != "completed" {
+		return "", "", "", "", fmt.Errorf("ignoring check_suite action %q", ev.Action)
+	}
+	parts := strings.SplitN(ev.Repository.FullName, "/", 2)
+	if len(parts) != 2 {
+		return "", "", "", "", fmt.Errorf("repository.full_name %q", ev.Repository.FullName)
+	}
+	return parts[0], parts[1], ev.CheckSuite.HeadBranch, ev.CheckRun.HeadSHA, nil
 }
 
 func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {

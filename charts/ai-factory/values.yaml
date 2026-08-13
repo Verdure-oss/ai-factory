@@ -15,6 +15,16 @@ server:
   # Keep <= sandbox.warmPoolReplicas so requests can always adopt a warm pool pod.
   maxConcurrentTasks: 2
 
+  # CI feedback loop: after a PR is created, wait for GitHub check events and
+  # repair CI failures in the reused sandbox. No polling — GitHub webhooks
+  # (check_suite / check_run) drive the watch via /webhook/github.
+  ciWatchEnabled: true
+  ciWatchMaxRetries: 3
+  ciWatchMaxWait: 30m
+  ciWatchSettleInterval: 60s
+  ciWatchMaxToolRounds: 3
+  ciWatchLogSnippetLines: 20
+
   # Service configuration
   service:
     type: NodePort
