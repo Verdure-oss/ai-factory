@@ -204,9 +204,16 @@ func ciWebhookHandler(cmd *cobra.Command) http.HandlerFunc {
 		} else {
 			owner, repo, branch, _, err = parseCheckRunEvent(body)
 		}
-		if err != nil || branch == "" {
-			// Ignore non-actionable events (created/in_progress, or events whose
-			// payload omits head_branch). Nothing to wake.
+		if err != nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if branch == "" {
+			// GitHub omits head_branch on some check_run events (PR head from a
+			// fork). Wake every waiter for this repo instead; evaluation is
+			// scoped to each waiter's own PR head so this stays correct.
+			fmt.Fprintf(cmd.ErrOrStderr(), "ci webhook: %s event for %s/%s (no branch); waking repo waiters\n", eventType, owner, repo)
+			notifyWaitersForRepo(fmt.Sprintf("%s/%s/", owner, repo))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

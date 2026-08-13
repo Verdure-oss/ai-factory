@@ -962,6 +962,28 @@ func notifyWaiter(key string) {
 	}
 }
 
+// notifyWaitersForRepo wakes every waiter registered under a repo prefix (e.g.
+// "owner/repo/"). Used when a check_run event carries no head_branch: the
+// branch key is unavailable, so we wake all watchers for the repo. A spurious
+// wake only triggers one quiet-window evaluation against each waiter's own PR
+// head, which stays correct — it can never misjudge, only waste one API call.
+func notifyWaitersForRepo(repoPrefix string) {
+	ciRegistryMu.Lock()
+	wake := make([]*ciWaiter, 0, 4)
+	for key, w := range ciRegistry {
+		if strings.HasPrefix(key, repoPrefix) {
+			wake = append(wake, w)
+		}
+	}
+	ciRegistryMu.Unlock()
+	for _, w := range wake {
+		select {
+		case w.notify <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // watchAndRepairCI waits for GitHub check events on the PR, evaluates the
 // check runs after a quiet window, and repairs any failures by running the
 // given repair runner in the reused sandbox. It returns ciWatchGreen once a
