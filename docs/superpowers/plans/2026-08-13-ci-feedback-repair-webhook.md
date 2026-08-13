@@ -163,10 +163,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
   - `func isNonFailingConclusion(conclusion string) bool`
   - `func formatCIFailures(annotations []CheckRunAnnotation) string`
   - `func summarizeCheckRuns(runs []CheckRun) string`
-  - `func collectFailedAnnotations(gh ciClient, ctx, owner, repo, sha string) ([]CheckRunAnnotation, error)` (updated signature vs the reverted `collectFailedAnnotations(gh, owner, repo, sha)` — see Step 3)
-  - `func collectFailedJobLogs(gh ciClient, ctx, owner, repo string, runs []CheckRun, snippetLines int) ([]JobLogSnippet, error)`
+  - `func collectFailedAnnotations(ctx context.Context, gh ciClient, owner, repo, sha string) ([]CheckRunAnnotation, error)` (context-first, matching `collectFailedJobLogs`; the reverted version had no ctx — see Step 2)
+  - `func collectFailedJobLogs(ctx context.Context, gh ciClient, owner, repo string, runs []CheckRun, snippetLines int) ([]JobLogSnippet, error)` (context-first, matching Task 6's call site)
   - `type JobLogSnippet struct { CheckRunName string; Path string; Lines []string }`
   - `func buildCIRepairInstructions(originalInstructions, prURL string, annotations []CheckRunAnnotation, logSnippets []JobLogSnippet, allowTestChanges bool, snippetLines int) string`
+  - `type ciClient interface { PullRequestHeadSHA(ctx, owner, repo, number string); ListCheckRuns(ctx, owner, repo, sha); ListCheckRunAnnotations(ctx, owner, repo, checkRunID); ActionsJobLogs(ctx, owner, repo, jobID); }` — defined here so Task 6 functions and the webhook tests can depend on it (methods reference the concrete `*GitHubClient` from Task 2).
 
 - [ ] **Step 1: Recreate the base file from the reverted commit**
 
@@ -175,7 +176,7 @@ The full set of GitHub-CI methods + evaluation + parse logic existed in `git sho
 - [ ] **Step 2: Extend `collectFailedAnnotations` with a context + error signature**
 
 ```go
-func collectFailedAnnotations(gh ciClient, ctx context.Context, owner, repo, sha string) ([]CheckRunAnnotation, error) {
+func collectFailedAnnotations(ctx context.Context, gh ciClient, owner, repo, sha string) ([]CheckRunAnnotation, error) {
 	runs, err := gh.ListCheckRuns(ctx, owner, repo, sha)
 	if err != nil {
 		return nil, err
@@ -197,7 +198,7 @@ func collectFailedAnnotations(gh ciClient, ctx context.Context, owner, repo, sha
 
 - [ ] **Step 3: Implement `collectFailedJobLogs` — parse details_url → job id → fetch+clean+snip**
 
-The event/check-run shape that reaches us: each failed `CheckRun` has `ID`; the *job* id for Actions logs is in the check-run's `details_url` (`/actions/runs/{run}/job/{job}`). We re-list runs when evaluating, so we must re-resolve job ids — the `details_url` appears only when we fetched the run object. To keep the plan tractable: `collectFailedJobLogs` re-lists check runs, and for each failing run derives its job id from a fresh `ListCheckRunDetails` call (add a `CheckRun.DetailsURL` field to the `CheckRun` struct in Step 1, and teach `ListCheckRuns` to populate it from the API). Then:
+The event/check-run shape that reaches us: each failed `CheckRun` object returned by `ListCheckRuns` carries `details_url` (e.g. `https://github.com/o/r/actions/runs/{run}/job/{job}`). Add a `CheckRun.DetailsURL string \`json:"details_url"\`` field to the struct in Step 1 and have `ListCheckRuns` decode it. Then:
 
 ```go
 // CheckRun (Step 1) gains: DetailsURL string `json:"details_url"`
@@ -459,7 +460,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 **Interfaces:**
 - Produces:
-  - `type ciClient interface { PullRequestHeadSHA(...); ListCheckRuns(...); ListCheckRunAnnotations(...); ActionsJobLogs(...) }` (extend `ci.go`'s `ciClient` from Task 3 — add `ActionsJobLogs`)
+  - `type ciClient interface { PullRequestHeadSHA(...); ListCheckRuns(...); ListCheckRunAnnotations(...); ActionsJobLogs(...) }` (defined in `ci.go` alongside the data model — Task 6 relies on it)
   - `type ciRepairRunner func(annotations []CheckRunAnnotation, logSnippets []JobLogSnippet) error` (changed from the reverted `func(annotations []CheckRunAnnotation) error` — carries job logs)
   - `type ciWatchOptions struct { maxRetries int; maxWait, settleInterval time.Duration; maxToolRounds int; allowTestChanges bool; logSnippetLines int }` (note: no `pollInterval`)
   - `func resolveCIWatchOptions() ciWatchOptions` — reads CI_WATCH_* via ReadConfig like the reverted one, minus retry interval, plus the two new keys.
@@ -470,23 +471,11 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
   - `func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh ciClient, repair ciRepairRunner, opts ciWatchOptions) (ciWatchOutcome, string)` — event-driven loop.
   - consts `ciWatchGreen/ciWatchFailed`
   - `func ciRepairRunnerFor(task *taskpkg.FactoryTask, namespace, sandboxName, prURL string, opts ciWatchOptions) ciRepairRunner`
-- Consumes: Task 3's `ci.go` helpers; Task 5's `taskpkg.BuildCIRepairScript`; `taskExists` var already in controller.go.
+- Consumes: Task 3's `ci.go` helpers (including the `ciClient` interface); Task 5's `taskpkg.BuildCIRepairScript`; `taskExists`/`namespaceForTask`/`changeRequestBranches` vars already in controller.go.
 
-- [ ] **Step 1: Restore the `ciClient` interface with `ActionsJobLogs`**
+- [ ] **Step 1: Confirm the `ciClient` interface from Task 3 covers `ActionsJobLogs`**
 
-In `controller.go`, restore the `ciClient` interface (from the reverted `controller.go` lines 883-888) and add `ActionsJobLogs`:
-
-```go
-// ciClient abstracts the GitHub CI API for testability.
-type ciClient interface {
-	PullRequestHeadSHA(ctx context.Context, owner, repo string, number int) (string, error)
-	ListCheckRuns(ctx context.Context, owner, repo, sha string) ([]CheckRun, error)
-	ListCheckRunAnnotations(ctx context.Context, owner, repo string, checkRunID int64) ([]CheckRunAnnotation, error)
-	ActionsJobLogs(ctx context.Context, owner, repo string, jobID int64) ([]byte, error)
-}
-```
-
-The concrete `*GitHubClient` already satisfies it (Task 2). Update any test fakes accordingly.
+The `ciClient` interface was defined in Task 3's `ci.go` with five methods (PullRequestHeadSHA, ListCheckRuns, ListCheckRunAnnotations, ActionsJobLogs). Verify it exists before continuing; the concrete `*GitHubClient` satisfies it (Task 2). If the implementer of Task 3 named a method differently, reconcile here before proceeding.
 
 - [ ] **Step 2: Implement the waiter registry**
 
@@ -539,8 +528,8 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 		return ciWatchFailed, fmt.Sprintf("parse PR URL %q: %v", prURL, err)
 	}
 	// branch name is deterministic and force-push-stable; matches webhook head_branch.
-	_, branch, _, _, _, _, _, _ := changeRequestBranchDefaultsForTask(task)
-	key := fmt.Sprintf("%s/%s/%s", owner, repo, branch)
+	changeBranch, _ := changeRequestBranches(task)
+	key := fmt.Sprintf("%s/%s/%s", owner, repo, changeBranch)
 	w := registerWaiter(key)
 	defer unregisterWaiter(key)
 	ctx := context.Background()
@@ -548,19 +537,23 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 	var lastSummary string
 	for attempt := 0; attempt < opts.maxRetries; attempt++ {
 		fmt.Fprintf(out, "--- CI watch attempt %d/%d waiting for events on %s\n", attempt+1, opts.maxRetries, key)
-		status, summary := waitForCIEvent(ctx, gh, owner, repo, number, w, opts, deadline)
+		status, summary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, deadline)
 		lastSummary = summary
 		switch status {
 		case ciCheckGreen:
 			fmt.Fprintf(out, "--- CI GREEN\n")
 			return ciWatchGreen, summary
 		case ciCheckRed:
-			annotations, annErr := collectFailedAnnotations(gh, ctx, owner, repo, "") // sha re-fetched inside
+			headSHA, shaErr := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if shaErr != nil {
+				return ciWatchFailed, fmt.Sprintf("get PR head sha: %v", shaErr)
+			}
+			annotations, annErr := collectFailedAnnotations(ctx, gh, owner, repo, headSHA)
 			if annErr != nil {
 				return ciWatchFailed, fmt.Sprintf("collect annotations: %v", annErr)
 			}
-			runs, _ := gh.ListCheckRuns(ctx, owner, repo, latestHeadSHA(ctx, gh, owner, repo, number))
-			logSnippets, _ := collectFailedJobLogs(gh, ctx, owner, repo, runs, opts.logSnippetLines)
+			runs, _ := gh.ListCheckRuns(ctx, owner, repo, headSHA)
+			logSnippets, _ := collectFailedJobLogs(ctx, gh, owner, repo, runs, opts.logSnippetLines)
 			fmt.Fprintf(out, "--- CI FAILED (attempt %d/%d); repairing\n%s", attempt+1, opts.maxRetries, formatCIFailures(annotations))
 			if err := repair(annotations, logSnippets); err != nil {
 				return ciWatchFailed, fmt.Sprintf("repair failed: %v", err)
@@ -580,7 +573,7 @@ Notes: `latestHeadSHA` is a small helper calling `gh.PullRequestHeadSHA`. `colle
 - [ ] **Step 4: Implement `waitForCIEvent` (quiet-window loop)**
 
 ```go
-func waitForCIEvent(ctx context.Context, gh ciClient, owner, repo string, number int, w *ciWaiter, opts ciWatchOptions, deadline time.Time) (ciCheckStatus, string) {
+func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient, owner, repo string, number int, w *ciWaiter, opts ciWatchOptions, deadline time.Time) (ciCheckStatus, string) {
 	var settle *time.Timer
 	var settleC <-chan time.Time
 	sha, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
@@ -622,7 +615,7 @@ func waitForCIEvent(ctx context.Context, gh ciClient, owner, repo string, number
 			if err != nil {
 				return ciCheckError, fmt.Sprintf("list check runs: %v", err)
 			}
-			if taskCancelledForCI(ctx, number) {
+			if !taskExists(namespaceForTask(task), task.Metadata.Name) {
 				return ciCheckPending, "task cancelled while waiting for CI"
 			}
 			return evaluateCheckRuns(runs), summarizeCheckRuns(runs)
@@ -633,7 +626,7 @@ func waitForCIEvent(ctx context.Context, gh ciClient, owner, repo string, number
 }
 ```
 
-Add `taskCancelledForCI(ctx, number)` as a thin wrapper over the existing `taskExists(namespace, name)` style guard — the watch loop needs the *task's* namespace/name; simplest: pass `task` into `waitForCIEvent` and call `if !taskExists(namespaceForTask(task), task.Metadata.Name) { return ciCheckPending, "cancelled" }`. Adjust the signature accordingly.
+`waitForCIEvent` takes `task` so the event-driven loop can detect cancellation (task deleted → `taskExists` false) at the observation point without adding any extra polling.
 
 - [ ] **Step 5: Implement `resolveCIWatchOptions` (no poll interval)**
 
