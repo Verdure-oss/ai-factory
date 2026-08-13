@@ -22,6 +22,7 @@ coding-agent 生成的 PR 可能无法通过目标仓库的 CI 测试。此前�
 | 4 | 事件丢失兜底 | **硬超时收场**：等待同时设 `maxWait` 硬 deadline，到期无事件则标记失败、释放 sandbox、issue 评论说明，不碰任何 GitHub API |
 | 5 | 修复输入 | **完整 job 日志**（已验证可通过 actions jobs logs API 获取，含 stack trace 与所有错误行）+ annotations + 原任务指令 |
 | 6 | 修复上下文 | **只继承主任务会话**：修复轮从主任务 dump 的 messages 开始（加载为初始上下文），轮间不累积；避免 session 因多轮修复无限膨胀 |
+| 7 | 修复探索预算 | **独立配置** `CI_WATCH_MAX_TOOL_ROUNDS`：修复轮重跑三阶段的探索上限不绑死主任务的 `OPENAI_MAX_TOOL_ROUNDS`。因 `kubectl exec` 无法附加 env，在 `BuildCIRepairScript` 脚本内 `export` 覆盖，仅影响该修复进程 |
 
 ## 保留复用（来自已 revert 的实现）
 
@@ -49,6 +50,8 @@ CI 修复**不是新机制，而是用新 prompt 重跑一遍完整 `ai-factory-
 | 提交 | 不提交（由 executeTask 提交） | commit + force-push 回原 PR |
 
 **上下文继承设计**（决策 6）：主任务结束时 agent 将完整 messages（含探索中的文件内容、工具输出、推理）dump 到 `/tmp/ai-factory-session.json`；修复轮 agent 启动时 load 该文件作为初始 messages，再追加修复指令——agent 无需重新 `find .`/全仓 `grep` 重建主任务已建立过的仓库认知，直接基于继承上下文对着 CI 日志改代码。修复轮之间**不累积**（每轮都从主任务快照重新开始），避免 token 逐轮膨胀。
+
+**修复探索预算**（决策 7）：修复轮重跑三阶段仍以探索阶段开头（有 Shell 工具、上限独立为 `CI_WATCH_MAX_TOOL_ROUNDS`），随后 final-script 与脚本修复轮沿用主任务预算。探索被静态指令定向收窄（只涉事文件）+ 会话继承，故默认可给较少的轮数。
 
 ## 静态修复指令（附带修复）
 
@@ -109,7 +112,7 @@ GitHub                              ai-factory-server
 
 保留：`CI_WATCH_ENABLED`、`CI_WATCH_MAX_RETRIES`、`CI_WATCH_MAX_WAIT`、`CI_WATCH_SETTLE_INTERVAL`（用作静默窗口时长）。
 删除：`CI_WATCH_RETRY_INTERVAL`（不再轮询）。
-新增：`CI_WATCH_LOG_SNIPPET_LINES`（job 日志错误段截取行数，默认 20）。
+新增：`CI_WATCH_LOG_SNIPPET_LINES`（job 日志错误段截取行数，默认 20）、`CI_WATCH_MAX_TOOL_ROUNDS`（修复轮探索上限，默认继承主任务值）。
 
 同步修改：`charts/ai-factory/templates/configmap.yaml`、`charts/ai-factory/values.yaml`、`scripts/upgrade.sh`、`scripts/update-config.sh`、`scripts/ai-factory.env`。
 
