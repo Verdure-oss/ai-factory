@@ -16,6 +16,7 @@ package task
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -394,4 +395,40 @@ func cloneHost(cloneURL string) (string, error) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// CIRepairOptions controls the CI-failure repair script's environment overrides.
+type CIRepairOptions struct {
+	SessionFile   string // /tmp/ai-factory-session.json; "" = no session
+	MaxToolRounds int    // override OPENAI_MAX_TOOL_ROUNDS in the repair agent; <=0 = inherit
+}
+
+// BuildCIRepairScript builds a single shell script that runs the coding agent
+// with CI-failure repair instructions against the existing checkout, then
+// commits and force-pushes the fix to the change branch (updating the PR).
+// The agent never commits or pushes; this script runs them after the agent.
+func BuildCIRepairScript(task *FactoryTask, repairInstructions string, opts CIRepairOptions) (string, error) {
+	if task == nil {
+		return "", errors.New("FactoryTask is required")
+	}
+	workDir := "/workspace/repo"
+	agentCommand := task.Spec.Agent.Command
+	if agentCommand == "" {
+		agentCommand = "ai-factory-agent openai-compatible"
+	}
+	changeBranch, _, remoteName, commitMessage, authorName, authorEmail, _, _ := changeRequestDefaults(task)
+	envSetup := ""
+	if opts.SessionFile != "" {
+		envSetup += fmt.Sprintf("export AI_FACTORY_SESSION_FILE=%s\n", shellQuote(opts.SessionFile))
+	}
+	if opts.MaxToolRounds > 0 {
+		envSetup += fmt.Sprintf("export OPENAI_MAX_TOOL_ROUNDS=%d\n", opts.MaxToolRounds)
+	}
+	script := fmt.Sprintf("set -eu\n%s%s\n%s\n%s",
+		envSetup,
+		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand),
+		commitChangesScript(workDir, commitMessage, authorName, authorEmail),
+		pushChangeBranchScript(workDir, remoteName, changeBranch, task.Spec.Source.BaseRef),
+	)
+	return script, nil
 }
