@@ -20,6 +20,8 @@ coding-agent 生成的 PR 可能无法通过目标仓库的 CI 测试。此前�
 | 2 | 等待期间 sandbox/claim | **同步等待、占住**（同方案 A）：`executeTask` 阻塞在等待上，收到事件立即进 sandbox 修复 |
 | 3 | 绿色判定 | **纯事件 + 静默窗口**：GitHub 推事件 → 重置 60s 窗口计时器 → 窗口安静到期才做 1 次 API 评估 |
 | 4 | 事件丢失兜底 | **硬超时收场**：等待同时设 `maxWait` 硬 deadline，到期无事件则标记失败、释放 sandbox、issue 评论说明，不碰任何 GitHub API |
+| 5 | 修复输入 | **完整 job 日志**（已验证可通过 actions jobs logs API 获取，含 stack trace 与所有错误行）+ annotations + 原任务指令 |
+| 6 | 修复上下文 | **只继承主任务会话**：修复轮从主任务 dump 的 messages 开始（加载为初始上下文），轮间不累积；避免 session 因多轮修复无限膨胀 |
 
 ## 保留复用（来自已 revert 的实现）
 
@@ -27,6 +29,34 @@ coding-agent 生成的 PR 可能无法通过目标仓库的 CI 测试。此前�
 - `evaluateCheckRuns` / `isNonFailingConclusion` / `collectFailedAnnotations` / `formatCIFailures`
 - 修复机制：`BuildCIRepairScript`（runAgentScript → commitChangesScript → pushChangeBranchScript 带 `--force`）+ `ciRepairRunnerFor`（`kubectl exec` 进原 sandbox）
 - `CIFeedbackFailed` 失败分类；CI_WATCH_* 配置走 ReadConfig 热更新
+
+**新增能力（已验证）**：
+
+- job 日志获取：失败 check-run 的 `details_url` 直接指向 `/actions/runs/{run}/job/{job}`；`GET /repos/{o}/{r}/actions/jobs/{job_id}/logs` → 303 + 10 分钟签名 URL → 全文；ANSI 清洗后错误清晰。实测 PR #929 lint job 拿到 `generator_test.go:256` typecheck 错误全文。注：`GitHubClient` 需新增 `ActionsJobLogs(jobID)` 方法。
+- 会话继承：`ai-factory-agent.py` 增加可选 `AI_FACTORY_SESSION_FILE`——启动时存在则加载为初始 `messages[]`，结束时（经 `redact()` 脱敏）dump 回该文件。运行在 `/tmp`（不污染仓库）。
+
+## 修复上下文继承（对照三段式）
+
+CI 修复**不是新机制，而是用新 prompt 重跑一遍完整 `ai-factory-agent`**（`BuildCIRepairScript` 第一段即 `runAgentScript`），内部同样经历 tool-exploration → final-script → repair-loop 三阶段。区别联系：
+
+| 维度 | 三段式内部 repair-loop | CI 修复（顶层重跑） |
+|---|---|---|
+| 触发 | 生成脚本退出码非 0 | CI check_run 事件 + job 日志回调 |
+| 驱动 | 同进程追加一轮模型请求 | 新进程、第二次 `kubectl exec` |
+| 工具 | `tool_choice=none` 无工具 | 全新探索阶段，有 Shell 工具 |
+| 上下文 | 进程内 messages 历史 | **默认无继承**（新进程从零开始） |
+| 修复对象 | bash 脚本 | 仓库真实代码（逻辑/mock/测试） |
+| 提交 | 不提交（由 executeTask 提交） | commit + force-push 回原 PR |
+
+**上下文继承设计**（决策 6）：主任务结束时 agent 将完整 messages（含探索中的文件内容、工具输出、推理）dump 到 `/tmp/ai-factory-session.json`；修复轮 agent 启动时 load 该文件作为初始 messages，再追加修复指令——agent 无需重新 `find .`/全仓 `grep` 重建主任务已建立过的仓库认知，直接基于继承上下文对着 CI 日志改代码。修复轮之间**不累积**（每轮都从主任务快照重新开始），避免 token 逐轮膨胀。
+
+## 静态修复指令（附带修复）
+
+`buildCIRepairInstructions` 增强：
+
+- 嵌入**完整 job 日志的错误段**（按 `##[error]` / `FAIL` / `Error` 上下文截取 ±N 行，默认 `CI_WATCH_LOG_SNIPPET_LINES=20`；日志为空降级为 annotations）。
+- 约束加严：只读 annotation 命名的文件、只修 `file:line` 报错、**禁全仓探索**（禁 `find .`、禁全仓 `grep -rn`、禁读与报错无关的 lint 配置）。
+- 允许修改测试代码（PR #929 案例：修复对象是 `generator_test.go` 中缺方法的 mock；只改主代码无法过 CI）。
 
 ## 架构与数据流
 
@@ -79,6 +109,7 @@ GitHub                              ai-factory-server
 
 保留：`CI_WATCH_ENABLED`、`CI_WATCH_MAX_RETRIES`、`CI_WATCH_MAX_WAIT`、`CI_WATCH_SETTLE_INTERVAL`（用作静默窗口时长）。
 删除：`CI_WATCH_RETRY_INTERVAL`（不再轮询）。
+新增：`CI_WATCH_LOG_SNIPPET_LINES`（job 日志错误段截取行数，默认 20）。
 
 同步修改：`charts/ai-factory/templates/configmap.yaml`、`charts/ai-factory/values.yaml`、`scripts/upgrade.sh`、`scripts/update-config.sh`、`scripts/ai-factory.env`。
 
@@ -88,10 +119,12 @@ GitHub                              ai-factory-server
 
 ## 实施范围
 
+- `components/agent-sandbox-images/coding-agent/ai-factory-agent.py`：`AI_FACTORY_SESSION_FILE` 会话 dump/load
 - `factory/cmd/factory/server/ci.go` 重建（事件驱动版）
 - `factory/cmd/factory/server/controller.go`：等待注册表 + executeTask 接线
 - `factory/cmd/factory/server/server.go`：webhook 事件分流
-- `factory/pkg/task/plan.go`：恢复 `BuildCIRepairScript`
+- `factory/cmd/factory/server/github.go`：`ActionsJobLogs` 方法
+- `factory/pkg/task/plan.go`：恢复 `BuildCIRepairScript`（接会话继承）
 - `factory/pkg/task/failure.go`：恢复 `CIFeedbackFailed`
 - 部署配置四处 + `scripts/ai-factory.env`
 
@@ -99,4 +132,5 @@ GitHub                              ai-factory-server
 
 - 静默窗口时长、`maxWait` 取值是否合理
 - 是否保留"窗口到期后的最终一次 API 评估"（当前 yes，否则纯事件无法收敛）
+- `AI_FACTORY_SESSION_FILE` 的 token 成本（继承的 messages 全量重放给每轮修复请求）
 - GitLab 侧暂不覆盖（GitLab MR CI 事件后续单独设计）
