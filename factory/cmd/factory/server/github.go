@@ -19,7 +19,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +70,30 @@ func NewGitHubClient() *GitHubClient {
 // HasToken returns true if a GitHub token is configured.
 func (c *GitHubClient) HasToken() bool {
 	return c.token != ""
+}
+
+// ActionsJobLogs returns the full log of a GitHub Actions job. The CheckRuns
+// API's details_url points at runs/{run}/job/{job}; job logs themselves are
+// served from a 303 redirect to a short-lived signed blob URL which the
+// default http client follows automatically.
+func (c *GitHubClient) ActionsJobLogs(ctx context.Context, owner, repo string, jobID int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", c.apiBase, url.PathEscape(owner), url.PathEscape(repo), jobID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	c.setHeaders(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("get actions job %d logs for %s/%s: %s", jobID, owner, repo, resp.Status)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // EnsureLabel creates a label if it doesn't exist.
