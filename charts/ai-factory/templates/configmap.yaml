@@ -19,11 +19,6 @@ data:
   OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.repairRequestTimeoutSeconds | quote }}
   OPENAI_VISION_ENABLED: {{ .Values.openai.visionEnabled | quote }}
   MAX_CONCURRENT_TASKS: {{ .Values.server.maxConcurrentTasks | quote }}
-  CI_WATCH_ENABLED: {{ .Values.server.ciWatchEnabled | quote }}
-  CI_WATCH_MAX_RETRIES: {{ .Values.server.ciWatchMaxRetries | quote }}
-  CI_WATCH_MAX_WAIT: {{ .Values.server.ciWatchMaxWait | quote }}
-  CI_WATCH_RETRY_INTERVAL: {{ .Values.server.ciWatchPollInterval | quote }}
-  CI_WATCH_SETTLE_INTERVAL: {{ .Values.server.ciWatchSettleInterval | quote }}
   {{- if .Values.gitProxy }}
   AI_FACTORY_GIT_PROXY: {{ .Values.gitProxy | quote }}
   {{- end }}

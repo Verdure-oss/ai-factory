@@ -120,11 +120,6 @@ HELM_ARGS=(
 [ -n "${OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS:-}" ] && HELM_ARGS+=(--set openai.repairRequestTimeoutSeconds="${OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS}")
 [ -n "${AI_FACTORY_GIT_PROXY:-}" ] && HELM_ARGS+=(--set gitProxy="${AI_FACTORY_GIT_PROXY}")
 [ -n "${MAX_CONCURRENT_TASKS:-}" ] && HELM_ARGS+=(--set server.maxConcurrentTasks="${MAX_CONCURRENT_TASKS}")
-[ -n "${CI_WATCH_ENABLED:-}" ] && HELM_ARGS+=(--set server.ciWatchEnabled="${CI_WATCH_ENABLED}")
-[ -n "${CI_WATCH_MAX_RETRIES:-}" ] && HELM_ARGS+=(--set server.ciWatchMaxRetries="${CI_WATCH_MAX_RETRIES}")
-[ -n "${CI_WATCH_MAX_WAIT:-}" ] && HELM_ARGS+=(--set server.ciWatchMaxWait="${CI_WATCH_MAX_WAIT}")
-[ -n "${CI_WATCH_RETRY_INTERVAL:-}" ] && HELM_ARGS+=(--set server.ciWatchPollInterval="${CI_WATCH_RETRY_INTERVAL}")
-[ -n "${CI_WATCH_SETTLE_INTERVAL:-}" ] && HELM_ARGS+=(--set server.ciWatchSettleInterval="${CI_WATCH_SETTLE_INTERVAL}")
 
 helm upgrade --install ai-factory "${CHART_PATH}" \
     --namespace "${NAMESPACE}" \
