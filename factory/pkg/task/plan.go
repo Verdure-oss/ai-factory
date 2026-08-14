@@ -49,6 +49,15 @@ type ExecutionStep struct {
 	Command []string `yaml:"command"`
 }
 
+// CISessionFile is the sandbox-local path where the coding agent dumps its
+// full conversation (messages history) when AI_FACTORY_SESSION_FILE is set.
+// The main task agent writes it; the CI repair agent loads it (BuildCIRepairScript
+// exports the same path) so the repair round inherits the main task's codebase
+// knowledge without re-exploring. /tmp is used so the session never pollutes
+// the repository checkout; both runs share the same sandbox container, so the
+// file survives between the two kubectl exec calls.
+const CISessionFile = "/tmp/ai-factory-session.json"
+
 // BuildExecutionPlan normalizes provider-specific source details into the
 // provider-neutral steps a controller needs to create a sandbox and run work.
 func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
@@ -154,9 +163,16 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 	}
 
 	if strings.TrimSpace(task.Spec.Work.Instructions) != "" {
+		// Dedicated agent step. The session file env var lets the agent load a
+		// prior session (CI repair round) and, more importantly, dump its own
+		// conversation at the end so a later repair round inherits context. It
+		// is set unconditionally — the agent is already backward compatible and
+		// simply skips dump/load when the var is unset.
+		agentScript := fmt.Sprintf("export AI_FACTORY_SESSION_FILE=%s\n%s", shellQuote(CISessionFile),
+			runAgentScript(workDir, task.Spec.Work.Instructions, task.Spec.Agent.PromptRef, agentCommand))
 		plan.Steps = append(plan.Steps, ExecutionStep{
 			Name:    "run coding agent",
-			Command: []string{"/bin/sh", "-lc", runAgentScript(workDir, task.Spec.Work.Instructions, task.Spec.Agent.PromptRef, agentCommand)},
+			Command: []string{"/bin/sh", "-lc", agentScript},
 		})
 	}
 
