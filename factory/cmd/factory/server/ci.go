@@ -517,6 +517,6 @@ func buildCIRepairInstructions(originalInstructions, prURL string, annotations [
 	} else {
 		b.WriteString("- Do NOT modify test files.\n")
 	}
-	b.WriteString("- After fixing, run the focused validation that corresponds to the failure (e.g. go build ./... or go test ./... for the affected package) using the same commands the failing job ran, then finish immediately.\n")
+	b.WriteString("- Validate with a NON-NETWORK check only. This sandbox is offline and cannot download missing Go toolchains, so DO NOT run `go build`, `go test`, `go vet`, or any command that may trigger a toolchain download (e.g. a `go` command when go.mod requires a newer toolchain) — it will hang on network and then fail. Prefer `gofmt -l <files>` or reading the fixed source yourself to confirm the change. The real validation runs again in CI; your job is only to make the code correct. After your fix, finish immediately.\n")
 	return b.String()
 }

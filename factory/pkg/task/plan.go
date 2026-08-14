@@ -440,6 +440,12 @@ func BuildCIRepairScript(task *FactoryTask, repairInstructions string, opts CIRe
 	if opts.MaxToolRounds > 0 {
 		envSetup += fmt.Sprintf("export OPENAI_MAX_TOOL_ROUNDS=%d\n", opts.MaxToolRounds)
 	}
+	// The repair sandbox is offline: a `go` command against a module that
+	// requires a newer toolchain would try to download it from proxy.golang.org
+	// and hang on a network timeout. Pin the local toolchain so any such
+	// attempt fails fast instead of burning the repair budget; the repair
+	// prompt already forbids go-based validation for the same reason.
+	envSetup += "export GOTOOLCHAIN=local\n"
 	script := fmt.Sprintf("set -eu\n%s%s\n%s\n%s",
 		envSetup,
 		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand),
