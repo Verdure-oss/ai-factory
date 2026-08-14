@@ -209,3 +209,37 @@ func (f *fakeCIClient) CommentOnIssue(ctx context.Context, owner, repo string, n
 	f.comments = append(f.comments, body)
 	return nil
 }
+
+// TestSnippetFromLogCollectsAllFailureLines proves snippetFromLog surfaces
+// EVERY failure line, not just the first one — a lint log reporting a
+// typecheck error AND a missing license header must show both, so the repair
+// agent fixes all problems in one pass.
+func TestSnippetFromLogCollectsAllFailureLines(t *testing.T) {
+	rawLog := "\x1b[31m##[error]internal/ci-repro/ci_repro.go:5:12: cannot use \"oops\" (untyped string constant) as int value (typecheck)\x1b[0m\n" +
+		"package ci_repro\n" +
+		"##[error]internal/ci-repro/ci_repro.go:1:1: Missed header for check (goheader)\n" +
+		"### issues summary\n" +
+		"##[error]issues found\n"
+	lines := snippetFromLog([]byte(rawLog), 20)
+	if lines == nil {
+		t.Fatal("snippetFromLog returned nil; expected failure lines")
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"cannot use \"oops\"",
+		"Missed header for check (goheader)",
+		"issues found",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("snippet missing failure line containing %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+// TestSnippetFromLogNoFailureReturnsNil proves the degrade-to-annotations
+// fallback: a log with no recognizable failure marker yields nil.
+func TestSnippetFromLogNoFailureReturnsNil(t *testing.T) {
+	if got := snippetFromLog([]byte("no errors here\njust gofmt output\n"), 20); got != nil {
+		t.Errorf("snippetFromLog(clean log) = %v, want nil", got)
+	}
+}

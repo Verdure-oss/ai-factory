@@ -45,6 +45,13 @@ type CheckSuite struct {
 	ID         int64  `json:"id"`
 	Status     string `json:"status"`     // queued | in_progress | completed
 	Conclusion string `json:"conclusion"` // success | failure | neutral | cancelled | skipped | timed_out | action_required | ...
+	// HeadSHA is the commit SHA this suite belongs to. Suites are fetched
+	// per-commit, but a repair force-push changes the PR head: after a push
+	// the API may briefly still return the previous commit's suites, so the
+	// verdict must only consider suites whose HeadSHA equals the current PR
+	// head. Stale-head suites (e.g. a still-failing old commit) must never
+	// re-trigger red or block green.
+	HeadSHA string `json:"head_sha"`
 }
 
 // CheckRunAnnotation is a single failure annotation on a check run.
@@ -55,10 +62,10 @@ type CheckRunAnnotation struct {
 	Message   string `json:"message"`
 }
 
-// JobLogSnippet is a cleaned excerpt of a failed Actions job log centered on
-// the first error line. Lines is nil when the log could not be fetched or
-// contained no recognizable error marker; the caller then degrades to the
-// per-file annotations instead.
+// JobLogSnippet is a cleaned excerpt of a failed Actions job log containing
+// every failure line found (with small context when they are sparse). Lines is
+// nil when the log could not be fetched or contained no recognizable error
+// marker; the caller then degrades to the per-file annotations instead.
 type JobLogSnippet struct {
 	CheckRunName string
 	Path         string // the check run's details_url the snippet was fetched from
@@ -403,15 +410,15 @@ var (
 	// job log lines, e.g. "\x1b[1;31m" emitted by GitHub Actions.
 	ciAnsiPattern = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
 	// ciFailureMarkers are substrings that mark an actionable error line in a
-	// job log. First matching line anchors the snippet window.
+	// job log. snippetFromLog collects every matching line.
 	ciFailureMarkers = []string{"##[error]", "FAIL", "Error:", "error:"}
 )
 
 // collectFailedJobLogs fetches the Actions job log for each completed failing
 // check run with a resolvable details_url job id, strips ANSI escapes, and
-// keeps a window of snippetLines lines around the first error marker. Runs
-// whose log cannot be fetched or contains no error marker are represented with
-// nil Lines so the caller can degrade to per-file annotations.
+// extracts every failure line via snippetFromLog. Runs whose log cannot be
+// fetched or contains no error marker are represented with nil Lines so the
+// caller can degrade to per-file annotations.
 func collectFailedJobLogs(ctx context.Context, gh ciClient, owner, repo string, runs []CheckRun, snippetLines int) ([]JobLogSnippet, error) {
 	if snippetLines <= 0 {
 		snippetLines = 20
@@ -438,30 +445,53 @@ func collectFailedJobLogs(ctx context.Context, gh ciClient, owner, repo string, 
 }
 
 // snippetFromLog cleans raw Actions job logs (ANSI stripped, CRLF normalized)
-// and returns the window of snippetLines lines around the first failure
-// marker. It returns nil when no marker is found.
+// and returns the actionable failure lines plus, when failures are few, a
+// small context window around each. Unlike the old first-marker-only behavior,
+// it surfaces EVERY failure line: a job that reports multiple problems in one
+// run (e.g. a typecheck error AND a missing license header) shows them all to
+// the repair agent in a single pass instead of one at a time. It returns nil
+// when no failure marker is found, which lets the caller degrade to
+// per-file annotations.
 func snippetFromLog(log []byte, snippetLines int) []string {
+	if snippetLines <= 0 {
+		snippetLines = 20
+	}
 	clean := make([]string, 0, 64)
-	idx := -1
+	var failIdx []int
 	for _, raw := range strings.Split(string(log), "\n") {
 		line := ciAnsiPattern.ReplaceAllString(strings.TrimSuffix(raw, "\r"), "")
-		if idx < 0 && isCIFailureLine(line) {
-			idx = len(clean)
+		if isCIFailureLine(line) {
+			failIdx = append(failIdx, len(clean))
 		}
 		clean = append(clean, line)
 	}
-	if idx < 0 {
+	if len(failIdx) == 0 {
 		return nil
 	}
-	start := idx - snippetLines
-	if start < 0 {
-		start = 0
+
+	// Window of context lines around each failure. Failures that come densely
+	// (a whole lint report) carry their own path:line, so no context needed;
+	// sparse failures (a lone "Error:" line) get surrounding lines so the
+	// agent can make sense of them.
+	window := 0
+	if len(failIdx) < 3 {
+		window = 3
 	}
-	end := idx + snippetLines + 1
-	if end > len(clean) {
-		end = len(clean)
+	out := make([]string, 0, len(failIdx)*(window*2+1))
+	emit := make(map[int]bool, len(failIdx)*(window*2+1))
+	add := func(i int) {
+		if i < 0 || i >= len(clean) || emit[i] {
+			return
+		}
+		emit[i] = true
+		out = append(out, clean[i])
 	}
-	return clean[start:end]
+	for _, idx := range failIdx {
+		for i := idx - window; i <= idx+window; i++ {
+			add(i)
+		}
+	}
+	return out
 }
 
 // isCIFailureLine reports whether a line from a cleaned job log contains one
@@ -517,6 +547,6 @@ func buildCIRepairInstructions(originalInstructions, prURL string, annotations [
 	} else {
 		b.WriteString("- Do NOT modify test files.\n")
 	}
-	b.WriteString("- Validate with a NON-NETWORK check only. This sandbox is offline and cannot download missing Go toolchains, so DO NOT run `go build`, `go test`, `go vet`, or any command that may trigger a toolchain download (e.g. a `go` command when go.mod requires a newer toolchain) — it will hang on network and then fail. Prefer `gofmt -l <files>` or reading the fixed source yourself to confirm the change. The real validation runs again in CI; your job is only to make the code correct. After your fix, finish immediately.\n")
+	b.WriteString("- Validate with a NON-NETWORK check only. The sandbox is offline: a `go` command that needs to download a missing Go toolchain or a module would hang on the network and fail, so prefer `gofmt -l <files>` or reading the fixed source yourself to confirm the change. If a targeted `go` command starts with a toolchain download it will fail fast (GOTOOLCHAIN=local); that is expected offline behavior, not a reason to keep fixing. The real validation runs again in CI; your job is only to make the code correct. After your fix, finish immediately.\n")
 	return b.String()
 }

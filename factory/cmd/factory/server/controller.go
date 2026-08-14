@@ -1122,7 +1122,21 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 		if err != nil {
 			return nil, "", err
 		}
-		return suites, summarizeCheckSuites(suites), nil
+		// Only suites belonging to the current PR head count. After a repair
+		// force-push, the API can still briefly return the previous commit's
+		// failing suites; feeding those to fastRed/allCompleted would
+		// re-trigger red on evidence from an already-superseded commit and
+		// cause a repair round to "regress" the fix. A suite with HeadSHA
+		// empty (defensive) matches nothing and is dropped, so an unborn
+		// suite set reads as "not converged" until the new head's suites
+		// appear.
+		filtered := make([]CheckSuite, 0, len(suites))
+		for _, s := range suites {
+			if s.HeadSHA == refreshed {
+				filtered = append(filtered, s)
+			}
+		}
+		return filtered, summarizeCheckSuites(filtered), nil
 	}
 	startConfirm := func(suites []CheckSuite) {
 		known = suiteIDs(suites)

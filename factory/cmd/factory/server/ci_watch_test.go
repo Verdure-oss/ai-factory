@@ -66,8 +66,8 @@ func TestWaitForCIEventGreenAfterBootstrap(t *testing.T) {
 	fake := &fakeCIClient{
 		headSHA: "abc123",
 		suites: []CheckSuite{
-			{ID: 1, Status: "completed", Conclusion: "success"},
-			{ID: 2, Status: "completed", Conclusion: "neutral"},
+			{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"},
+			{ID: 2, Status: "completed", Conclusion: "neutral", HeadSHA: "abc123"},
 		},
 	}
 	done := runWaitForCIEvent(t, fake, key)
@@ -99,7 +99,7 @@ func TestWaitForCIEventEmptySuitesIsNotGreen(t *testing.T) {
 		// Still waiting — correct: not converged.
 	}
 
-	fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success"}}
+	fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}}
 	notifyWaiter(key)
 	select {
 	case r := <-done:
@@ -120,7 +120,7 @@ func TestWaitForCIEventPendingUntilComplete(t *testing.T) {
 	const key = "owner/repo/factory-task/github-owner-repo-42"
 	fake := &fakeCIClient{
 		headSHA: "abc123",
-		suites:  []CheckSuite{{ID: 1, Status: "in_progress", Conclusion: ""}},
+		suites:  []CheckSuite{{ID: 1, Status: "in_progress", Conclusion: "", HeadSHA: "abc123"}},
 	}
 	done := runWaitForCIEvent(t, fake, key)
 
@@ -136,7 +136,7 @@ func TestWaitForCIEventPendingUntilComplete(t *testing.T) {
 	}
 
 	// Now the long job finishes; the next wake starts the confirm window.
-	fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success"}}
+	fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}}
 	notifyWaiter(key)
 	select {
 	case r := <-done:
@@ -157,7 +157,7 @@ func TestWaitForCIEventFailsFastOnCompletedFailure(t *testing.T) {
 	fake := &fakeCIClient{
 		headSHA: "abc123",
 		suites: []CheckSuite{
-			{ID: 1, Status: "completed", Conclusion: "failure"},
+			{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "abc123"},
 			{ID: 2, Status: "in_progress", Conclusion: ""},
 		},
 	}
@@ -179,13 +179,13 @@ func TestWatchAndRepairCICommentsPRStartAndEnd(t *testing.T) {
 	withTaskExists(t, true)
 	fake := &fakeCIClient{
 		headSHA: "abc123",
-		suites:  []CheckSuite{{ID: 1, Status: "completed", Conclusion: "failure"}},
+		suites:  []CheckSuite{{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "abc123"}},
 	}
 	repairRounds := 0
 	repair := func([]CheckRunAnnotation, []JobLogSnippet) error {
 		repairRounds++
 		// A successful repair makes CI green on the next evaluation.
-		fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success"}}
+		fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}}
 		return nil
 	}
 	task := &taskpkg.FactoryTask{
@@ -218,7 +218,7 @@ func TestWatchAndRepairCIContinuesAfterRepairFailure(t *testing.T) {
 	withTaskExists(t, true)
 	fake := &fakeCIClient{
 		headSHA: "abc123",
-		suites:  []CheckSuite{{ID: 1, Status: "completed", Conclusion: "failure"}},
+		suites:  []CheckSuite{{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "abc123"}},
 	}
 	repairRounds := 0
 	repair := func([]CheckRunAnnotation, []JobLogSnippet) error {
@@ -246,5 +246,72 @@ func TestWatchAndRepairCIContinuesAfterRepairFailure(t *testing.T) {
 	}
 	if !strings.Contains(fake.comments[1], "could not be made green") {
 		t.Errorf("final comment = %q, want a failure result", fake.comments[1])
+	}
+}
+// TestWaitForCIEventIgnoresStaleSuites proves the head_sha filter: after a
+// repair force-push the PR head moves, and the API may still return the
+// previous commit's failing suites. Those stale suites must NOT re-trigger red
+// or block green — only suites whose HeadSHA equals the current PR head count.
+func TestWaitForCIEventIgnoresStaleSuites(t *testing.T) {
+	withTaskExists(t, true)
+	const key = "owner/repo/factory-task/github-owner-repo-42"
+	fake := &fakeCIClient{
+		headSHA: "abc123", // current PR head
+		suites: []CheckSuite{
+			// Stale: this suite belongs to the previous (already repaired)
+			// commit and still shows failure — must be ignored.
+			{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "olddeadbeef"},
+			// Current-head suite, still running: not converged yet.
+			{ID: 2, Status: "in_progress", Conclusion: "", HeadSHA: "abc123"},
+		},
+	}
+	done := runWaitForCIEvent(t, fake, key)
+	// The stale failure must not settle red; and with the live suite
+	// in_progress we keep waiting.
+	select {
+	case r := <-done:
+		t.Fatalf("waitForCIEvent returned %v (summary %q): stale-head failure must not judge red", r.status, r.summary)
+	case <-time.After(400 * time.Millisecond):
+		// Correct: still waiting on the in_progress current-head suite.
+	}
+
+	// Now the current-head suite completes successfully: green.
+	fake.suites = []CheckSuite{
+		{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "olddeadbeef"},
+		{ID: 2, Status: "completed", Conclusion: "success", HeadSHA: "abc123"},
+	}
+	notifyWaiter(key)
+	select {
+	case r := <-done:
+		if r.status != ciCheckGreen {
+			t.Fatalf("status = %v (summary %q), want ciCheckGreen", r.status, r.summary)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not go green: stale suite must not block green once current head converges")
+	}
+}
+
+// TestWaitForCIEventAllSuitesStaleIsNotConverged proves that when EVERY suite
+// comes back with a stale head_sha (the new commit's suites have not been
+// registered yet), the list reads as not-converged and the loop must keep
+// waiting — it must not judge green (vacuous all-completed) from an empty
+// filtered set.
+func TestWaitForCIEventAllSuitesStaleIsNotConverged(t *testing.T) {
+	withTaskExists(t, true)
+	const key = "owner/repo/factory-task/github-owner-repo-42"
+	fake := &fakeCIClient{
+		headSHA: "abc123",
+		// All suites stale: new head has no suites registered yet.
+		suites: []CheckSuite{
+			{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "olddeadbeef"},
+		},
+	}
+	done := runWaitForCIEvent(t, fake, key)
+	notifyWaiter(key)
+	select {
+	case r := <-done:
+		t.Fatalf("waitForCIEvent returned %v (summary %q) with only stale suites; empty filtered set must not be green", r.status, r.summary)
+	case <-time.After(400 * time.Millisecond):
+		// Correct: not converged.
 	}
 }
