@@ -16,7 +16,12 @@ FROM node:22-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG INSTALL_CODEX_CLI=false
-ARG GO_VERSION=1.25.4
+# Sandbox Go toolchain. Keep this >= the highest `go` directive any target
+# repo requires: the sandbox is offline, so `go` commands must never try to
+# auto-download a newer toolchain (proxy.golang.org is unreachable). Bump when
+# a target repo raises its go.mod `go` line. package.sh overrides this via
+# --build-arg with the AI_FACTORY_GO_VERSION env (default: ai-factory go.mod).
+ARG GO_VERSION=1.25.12
 
 ENV HOME=/home/agent \
     WORKSPACE=/workspace \
