@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +207,44 @@ func TestWatchAndRepairCICommentsPRStartAndEnd(t *testing.T) {
 	}
 	if !strings.Contains(fake.comments[1], "green after 1 repair round") {
 		t.Errorf("end comment = %q, want a green result", fake.comments[1])
+	}
+}
+
+// TestWatchAndRepairCIContinuesAfterRepairFailure proves a repair pass that
+// fails does not abort the watch: watchAndRepairCI keeps trying until
+// maxRetries is exhausted, then reports ciWatchFailed (rather than dying on
+// the first repair error).
+func TestWatchAndRepairCIContinuesAfterRepairFailure(t *testing.T) {
+	withTaskExists(t, true)
+	fake := &fakeCIClient{
+		headSHA: "abc123",
+		suites:  []CheckSuite{{ID: 1, Status: "completed", Conclusion: "failure"}},
+	}
+	repairRounds := 0
+	repair := func([]CheckRunAnnotation, []JobLogSnippet) error {
+		repairRounds++
+		return errors.New("simulated repair exec failure")
+	}
+	task := &taskpkg.FactoryTask{
+		Metadata: taskpkg.ObjectMeta{Name: "github-owner-repo-42", Namespace: "default"},
+	}
+	var out strings.Builder
+	outcome, summary := watchAndRepairCI(&out, task, "https://github.com/owner/repo/pull/42", fake, repair, ciWatchOptsForTest())
+	if outcome != ciWatchFailed {
+		t.Fatalf("outcome = %v, want ciWatchFailed", outcome)
+	}
+	if repairRounds != 3 {
+		t.Fatalf("repair attempts = %d, want 3 (maxRetries); a failing repair must not abort early", repairRounds)
+	}
+	if !strings.Contains(summary, "3 repair attempts") {
+		t.Errorf("summary = %q, want the budget-exhausted message", summary)
+	}
+	// start comment + final failure comment (roundsRepaired is 0 because no
+	// repair pass succeeded).
+	if len(fake.comments) != 2 {
+		t.Fatalf("expected 2 PR comments, got %d: %q", len(fake.comments), fake.comments)
+	}
+	if !strings.Contains(fake.comments[1], "could not be made green") {
+		t.Errorf("final comment = %q, want a failure result", fake.comments[1])
 	}
 }

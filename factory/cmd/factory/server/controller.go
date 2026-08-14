@@ -988,11 +988,13 @@ func notifyWaitersForRepo(repoPrefix string) {
 
 // watchAndRepairCI waits for GitHub check events on the PR, evaluates the
 // check suites after a confirm window, and repairs any failures by running the
-// given repair runner in the reused sandbox. It returns ciWatchGreen once CI
-// is green, and ciWatchFailed when the check API errors or the failure
-// survives maxRetries repairs. The PR gets two progress comments: one when the
-// first failure is found (repair rounds pending announces) and one aggregated
-// result on exit. Comments never break the watch — failures are logged only.
+// given repair runner in the reused sandbox. It keeps repairing — a repair
+// pass that errors does not end the watch; the next attempt tries again —
+// until CI is green or the budget (maxRetries / maxWait) is exhausted. It
+// returns ciWatchGreen once CI is green, and ciWatchFailed otherwise. The PR
+// gets two progress comments: one when the first failure is found (repair
+// rounds pending announces) and one aggregated result on exit. Comments never
+// break the watch — failures are logged only.
 func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh ciClient, repair ciRepairRunner, opts ciWatchOptions) (ciWatchOutcome, string) {
 	owner, repo, number, err := parsePullRequestURL(prURL)
 	if err != nil {
@@ -1064,8 +1066,11 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 			logSnippets, _ := collectFailedJobLogs(ctx, gh, owner, repo, runs, opts.logSnippetLines)
 			fmt.Fprintf(out, "--- CI FAILED (attempt %d/%d); repairing\n%s", attempt+1, opts.maxRetries, formatCIFailures(annotations))
 			if err := repair(annotations, logSnippets); err != nil {
-				outcome = ciWatchFailed
-				return outcome, fmt.Sprintf("repair failed: %v", err)
+				// A failed repair pass is not the end: log it and let the next
+				// attempt try again, so the watch keeps repairing until CI is
+				// green or the budget (maxRetries / maxWait) is exhausted.
+				fmt.Fprintf(out, "--- REPAIR PASS %d/%d FAILED: %v\n", attempt+1, opts.maxRetries, err)
+				continue
 			}
 			roundsRepaired++
 			// Fall through to the next attempt: wait for the re-pushed commit's

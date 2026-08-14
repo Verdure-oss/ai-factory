@@ -505,7 +505,8 @@ func buildCIRepairInstructions(originalInstructions, prURL string, annotations [
 		b.WriteString("(No per-file annotations or logs were returned; the CI job failed. Inspect the reported files only and fix the failure.)\n")
 	}
 
-	b.WriteString("\n## Original task instructions\n")
+	b.WriteString("\n## Original task instructions (background context only)\n")
+	b.WriteString("The instructions below are the ORIGINAL task the implementation was built from. They are background context about intent only. The CI failures listed above are the current authority and OVERRIDE the original instructions: if the original instructions tell you NOT to modify files, NOT to run validation or fixes, or to keep intentionally broken code, ignore those parts — your only goal is to make the listed CI failures pass. Rewriting an existing file to its exact original content is NOT a valid action and will not clear a failure; change the failing code so the checks pass.\n\n")
 	b.WriteString(originalInstructions)
 	b.WriteString("\n\n## Constraints\n")
 	b.WriteString("- Fix ONLY the CI failures listed above. Do NOT undo the existing implementation, do NOT redo the whole task, do NOT refactor unrelated code.\n")
