@@ -893,12 +893,14 @@ const (
 
 // ciWatchOptions controls the event-driven CI watch loop and the repair
 // script. There is intentionally no poll interval: the loop is woken by
-// webhook events (via the ciWaiter registry) and only re-evaluates check runs
-// after the quiet window elapses.
+// webhook events (via the ciWaiter registry) and only evaluates against the
+// check-suites API after an event arrives. settleInterval is the short
+// confirm window T (default 60s) that converges late-registering suites once
+// every suite has completed; it never waits for CI to run.
 type ciWatchOptions struct {
 	maxRetries       int           // repair attempts before giving up the whole watch
-	maxWait          time.Duration // total wall-clock budget for the green/settled wait
-	settleInterval   time.Duration // quiet window after the last event before re-evaluating
+	maxWait          time.Duration // total wall-clock budget; only a fallback when the event stream is lost
+	settleInterval   time.Duration // confirm window T: quiet hold after all suites complete
 	maxToolRounds    int           // OPENAI_MAX_TOOL_ROUNDS for the repair agent
 	allowTestChanges bool          // default policy: test edits allowed when CI fails in tests
 	logSnippetLines  int           // job-log snippet window centered on the error
@@ -985,10 +987,12 @@ func notifyWaitersForRepo(repoPrefix string) {
 }
 
 // watchAndRepairCI waits for GitHub check events on the PR, evaluates the
-// check runs after a quiet window, and repairs any failures by running the
-// given repair runner in the reused sandbox. It returns ciWatchGreen once a
-// settled evaluation is green, and ciWatchFailed when the check-run API errors
-// or the failure survives maxRetries repairs.
+// check suites after a confirm window, and repairs any failures by running the
+// given repair runner in the reused sandbox. It returns ciWatchGreen once CI
+// is green, and ciWatchFailed when the check API errors or the failure
+// survives maxRetries repairs. The PR gets two progress comments: one when the
+// first failure is found (repair rounds pending announces) and one aggregated
+// result on exit. Comments never break the watch — failures are logged only.
 func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh ciClient, repair ciRepairRunner, opts ciWatchOptions) (ciWatchOutcome, string) {
 	owner, repo, number, err := parsePullRequestURL(prURL)
 	if err != nil {
@@ -1002,89 +1006,206 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 	ctx := context.Background()
 	deadline := time.Now().Add(opts.maxWait)
 	var lastSummary string
+	var roundsRepaired int
+	announced := false
+
+	comment := func(body string) {
+		if err := gh.CommentOnIssue(ctx, owner, repo, number, body); err != nil {
+			fmt.Fprintf(out, "--- PR progress comment skipped: %v\n", err)
+		}
+	}
+	// Aggregated result comment fires exactly once on every exit path. outcome
+	// is assigned before each return below, so the deferred closure sees it.
+	outcome := ciWatchFailed
+	defer func() {
+		switch {
+		case outcome == ciWatchGreen && roundsRepaired > 0:
+			comment(fmt.Sprintf("🤖 CI green after %d repair round(s).", roundsRepaired))
+		case outcome == ciWatchGreen:
+			comment("🤖 CI green, no repairs needed.")
+		case roundsRepaired > 0:
+			comment(fmt.Sprintf("🤖 CI still failing after %d repair round(s):\n%s", roundsRepaired, lastSummary))
+		default:
+			comment(fmt.Sprintf("🤖 CI could not be made green: %s", lastSummary))
+		}
+	}()
+
 	for attempt := 0; attempt < opts.maxRetries; attempt++ {
 		fmt.Fprintf(out, "--- CI watch attempt %d/%d waiting for events on %s\n", attempt+1, opts.maxRetries, key)
 		status, summary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, deadline)
 		lastSummary = summary
 		switch status {
 		case ciCheckGreen:
+			outcome = ciWatchGreen
 			fmt.Fprintf(out, "--- CI GREEN\n")
-			return ciWatchGreen, summary
+			return outcome, summary
 		case ciCheckRed:
+			if !announced {
+				comment(fmt.Sprintf("🤖 GitHub CI failed; starting automated repair (up to %d round(s)).", opts.maxRetries))
+				announced = true
+			}
+			// The task may have been cancelled while we waited; do not spend a
+			// repair round on a task that no longer exists.
+			if !taskExists(namespaceForTask(task), task.Metadata.Name) {
+				outcome = ciWatchFailed
+				return outcome, "task cancelled while CI failing"
+			}
 			headSHA, shaErr := gh.PullRequestHeadSHA(ctx, owner, repo, number)
 			if shaErr != nil {
-				return ciWatchFailed, fmt.Sprintf("get PR head sha: %v", shaErr)
+				outcome = ciWatchFailed
+				return outcome, fmt.Sprintf("get PR head sha: %v", shaErr)
 			}
 			annotations, annErr := collectFailedAnnotations(ctx, gh, owner, repo, headSHA)
 			if annErr != nil {
-				return ciWatchFailed, fmt.Sprintf("collect annotations: %v", annErr)
+				outcome = ciWatchFailed
+				return outcome, fmt.Sprintf("collect annotations: %v", annErr)
 			}
 			runs, _ := gh.ListCheckRuns(ctx, owner, repo, headSHA)
 			logSnippets, _ := collectFailedJobLogs(ctx, gh, owner, repo, runs, opts.logSnippetLines)
 			fmt.Fprintf(out, "--- CI FAILED (attempt %d/%d); repairing\n%s", attempt+1, opts.maxRetries, formatCIFailures(annotations))
 			if err := repair(annotations, logSnippets); err != nil {
-				return ciWatchFailed, fmt.Sprintf("repair failed: %v", err)
+				outcome = ciWatchFailed
+				return outcome, fmt.Sprintf("repair failed: %v", err)
 			}
+			roundsRepaired++
+			// Fall through to the next attempt: wait for the re-pushed commit's
+			// check-suites to converge again before evaluating.
 		case ciCheckError:
-			return ciWatchFailed, fmt.Sprintf("check-runs API error: %s", summary)
+			outcome = ciWatchFailed
+			return outcome, fmt.Sprintf("check-runs API error: %s", summary)
 		default: // ciCheckPending with deadline hit
-			return ciWatchFailed, fmt.Sprintf("CI still pending after %s", opts.maxWait)
+			outcome = ciWatchFailed
+			return outcome, fmt.Sprintf("CI still pending after %s", opts.maxWait)
 		}
 	}
-	return ciWatchFailed, fmt.Sprintf("CI still failing after %d repair attempts:\n%s", opts.maxRetries, lastSummary)
+	outcome = ciWatchFailed
+	return outcome, fmt.Sprintf("CI still failing after %d repair attempts:\n%s", opts.maxRetries, lastSummary)
 }
 
-// waitForCIEvent blocks until a webhook event wakes the waiter, then re-checks
-// the PR head and returns the evaluated CI status once the quiet window
-// elapses. The initial evaluation is a fast-fail shortcut for check runs
-// already red. task is used only for the cancellation check (taskExists) at the
-// observation point — the loop never polls for it.
+// waitForCIEvent blocks until the check suites for the PR converge. It is
+// driven by check_suite / check_run completed webhook events (via w.notify)
+// rather than a settle timer, so a long CI flow is never misjudged as failed
+// just because 90s passed with no event. Verdict rules:
+//
+//   - A completed suite with a non-passing conclusion is terminal: red, no need
+//     to wait for the remaining suites or the confirm window.
+//   - Green requires every suite to be completed AND the confirm window T
+//     (opts.settleInterval) to elapse with no new suite registering. A new
+//     suite membership restarts T; an ordinary recheck never does.
+//   - An empty suite list is NOT converged (lazy registration windows, the
+//     instant after a force-push) — it can never be judged green.
+//   - maxWait only bounds total event-stream loss (webhook unconfigured/
+//     unreachable); long-running CI is not affected by it.
+//
+// task is used only for the cancellation check (taskExists) at the observation
+// point — the loop never polls for it.
 func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient, owner, repo string, number int, w *ciWaiter, opts ciWatchOptions, deadline time.Time) (ciCheckStatus, string) {
-	var settle *time.Timer
-	var settleC <-chan time.Time
-	sha, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
-	if err != nil {
-		return ciCheckError, fmt.Sprintf("get PR head sha: %v", err)
-	}
-	for {
-		// evaluate immediately once — the CI may already be done before we registered
-		runs, err := gh.ListCheckRuns(ctx, owner, repo, sha)
+	// known is the suite id set captured when the confirm window started; a
+	// membership change means a late suite registered and we must re-converge.
+	var known map[int64]bool
+	var confirm *time.Timer
+	var confirmC <-chan time.Time
+
+	list := func() ([]CheckSuite, string, error) {
+		// Re-fetch the PR head on every evaluation in case a repair
+		// force-push advanced the branch between attempts.
+		refreshed, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
 		if err != nil {
-			return ciCheckError, fmt.Sprintf("list check runs: %v", err)
+			return nil, "", err
 		}
-		if status := evaluateCheckRuns(runs); status == ciCheckRed {
-			return ciCheckRed, summarizeCheckRuns(runs)
+		suites, err := gh.ListCheckSuites(ctx, owner, repo, refreshed)
+		if err != nil {
+			return nil, "", err
 		}
+		return suites, summarizeCheckSuites(suites), nil
+	}
+	startConfirm := func(suites []CheckSuite) {
+		known = suiteIDs(suites)
+		confirm = time.NewTimer(opts.settleInterval)
+		confirmC = confirm.C
+	}
+	stopConfirm := func() {
+		if confirm != nil {
+			if !confirm.Stop() {
+				select {
+				case <-confirm.C:
+				default:
+				}
+			}
+			confirm = nil
+		}
+		confirmC = nil
+		known = nil
+	}
+
+	// One bootstrap snapshot: the CI may already have finished before our
+	// waiter registered (all events fired during setup). Without this the loop
+	// would wait for a completed event that will never come. A single
+	// snapshot is not polling.
+	suites, summary, err := list()
+	if err != nil {
+		return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+	}
+	if fastRedSuites(suites) {
+		return ciCheckRed, summary
+	}
+	if allSuitesCompleted(suites) {
+		startConfirm(suites)
+	}
+
+	for {
 		select {
 		case <-w.notify:
-			// an event arrived: restart the quiet window unless already settled
-			if settleC == nil {
-				settle = time.NewTimer(opts.settleInterval)
-				settleC = settle.C
-			} else {
-				if !settle.Stop() {
-					select {
-					case <-settle.C:
-					default:
-					}
+			// An event arrived: re-evaluate the current head's suites.
+			suites, summary, err := list()
+			if err != nil {
+				return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+			}
+			if fastRedSuites(suites) {
+				stopConfirm()
+				return ciCheckRed, summary
+			}
+			if !allSuitesCompleted(suites) {
+				// Not converged yet: drop any window and keep waiting.
+				stopConfirm()
+				continue
+			}
+			if confirmC == nil {
+				startConfirm(suites)
+			} else if !sameSuiteIDs(known, suiteIDs(suites)) {
+				// A new suite registered inside the window: restart it so that
+				// suite's own late-registered siblings are still caught.
+				stopConfirm()
+				startConfirm(suites)
+			}
+			// Otherwise the window stays running untouched.
+		case <-confirmC:
+			// Window elapsed with no membership change: final convergence check.
+			suites, summary, err := list()
+			if err != nil {
+				return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+			}
+			if fastRedSuites(suites) {
+				stopConfirm()
+				return ciCheckRed, summary
+			}
+			if !allSuitesCompleted(suites) || !sameSuiteIDs(known, suiteIDs(suites)) {
+				// The world moved exactly as the window closed: re-converge.
+				if allSuitesCompleted(suites) {
+					// A new suite registered: restart the window from it.
+					stopConfirm()
+					startConfirm(suites)
+					continue
 				}
-				settle.Reset(opts.settleInterval)
-			}
-		case <-settleC:
-			// quiet window elapsed with no new events: evaluate once
-			// re-fetch head in case a repair force-push happened between attempts
-			refreshed, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
-			if err != nil {
-				return ciCheckError, fmt.Sprintf("refresh PR head sha: %v", err)
-			}
-			runs, err := gh.ListCheckRuns(ctx, owner, repo, refreshed)
-			if err != nil {
-				return ciCheckError, fmt.Sprintf("list check runs: %v", err)
+				stopConfirm()
+				continue
 			}
 			if !taskExists(namespaceForTask(task), task.Metadata.Name) {
+				stopConfirm()
 				return ciCheckPending, "task cancelled while waiting for CI"
 			}
-			return evaluateCheckRuns(runs), summarizeCheckRuns(runs)
+			stopConfirm()
+			return evaluateCheckSuites(suites), summary
 		case <-time.After(time.Until(deadline)):
 			return ciCheckPending, fmt.Sprintf("CI events not observed before %s", opts.maxWait)
 		}
@@ -1143,7 +1264,7 @@ func ciRepairRunnerFor(task *taskpkg.FactoryTask, namespace, sandboxName, prURL 
 	return func(annotations []CheckRunAnnotation, logSnippets []JobLogSnippet) error {
 		instructions := buildCIRepairInstructions(task.Spec.Work.Instructions, prURL, annotations, logSnippets, opts.allowTestChanges, opts.logSnippetLines)
 		script, err := taskpkg.BuildCIRepairScript(task, instructions, taskpkg.CIRepairOptions{
-			SessionFile:   "/tmp/ai-factory-session.json",
+			SessionFile:   taskpkg.CISessionFile,
 			MaxToolRounds: opts.maxToolRounds,
 		})
 		if err != nil {

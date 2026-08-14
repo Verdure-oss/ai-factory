@@ -245,19 +245,28 @@ func parseCheckSuiteEvent(body []byte) (owner, repo, branch, headSHA string, err
 }
 
 // parseCheckRunEvent returns owner, repo, and head_branch for a check_run
-// event. Any action restarts the quiet window (that is the point of notifying).
+// event that completed. Earlier states (queued/in_progress) carry no verdict
+// information and would only add noise wakes that re-pull the check-suites
+// API to no end; completed is the only actionable action. It is also the
+// fork fallback alarm: check_run events for fork PRs omit head_branch, and
+// their completed action wakes repo-wide waiters via notifyWaitersForRepo.
 func parseCheckRunEvent(body []byte) (owner, repo, branch, headSHA string, err error) {
-	return parseCIEvent(body, false)
+	return parseCIEvent(body, true)
 }
 
-func parseCIEvent(body []byte, suiteOnly bool) (owner, repo, branch, headSHA string, err error) {
+// parseCIEvent extracts owner/repo/branch/headSHA from a check_suite or
+// check_run webhook payload. When completedOnly is true (both event types are
+// consumed this way), only events with action "completed" are accepted;
+// queued/in_progress/requested_action events are ignored.
+func parseCIEvent(body []byte, completedOnly bool) (owner, repo, branch, headSHA string, err error) {
 	var ev ciEventPayload
 	if err := json.Unmarshal(body, &ev); err != nil {
 		return "", "", "", "", err
 	}
-	// For check_suite events, only completed suites carry a verdict.
-	if suiteOnly && ev.Action != "completed" {
-		return "", "", "", "", fmt.Errorf("ignoring check_suite action %q", ev.Action)
+	// Only completed carries a verdict (check_suite) or a meaningful wake
+	// (check_run); earlier states are pure noise.
+	if completedOnly && ev.Action != "completed" {
+		return "", "", "", "", fmt.Errorf("ignoring CI event action %q", ev.Action)
 	}
 	parts := strings.SplitN(ev.Repository.FullName, "/", 2)
 	if len(parts) != 2 {

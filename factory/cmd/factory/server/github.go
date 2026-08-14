@@ -96,6 +96,36 @@ func (c *GitHubClient) ActionsJobLogs(ctx context.Context, owner, repo string, j
 	return io.ReadAll(resp.Body)
 }
 
+// CommentOnIssue posts a comment on a GitHub issue or pull request (GitHub
+// treats a PR as an issue for this endpoint). Used to report CI repair
+// progress on the PR. Errors surface to the caller, which logs and continues;
+// the repair loop must not fail because a progress comment bounced.
+func (c *GitHubClient) CommentOnIssue(ctx context.Context, owner, repo string, number int, body string) error {
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.apiBase, url.PathEscape(owner), url.PathEscape(repo), number),
+		bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	c.setHeaders(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		io.Copy(io.Discard, resp.Body)
+		return fmt.Errorf("comment on %s/%s#%d: %s", owner, repo, number, resp.Status)
+	}
+	return nil
+}
+
 // EnsureLabel creates a label if it doesn't exist.
 func (c *GitHubClient) EnsureLabel(ctx context.Context, repo, name, color, description string) error {
 	if !c.HasToken() {

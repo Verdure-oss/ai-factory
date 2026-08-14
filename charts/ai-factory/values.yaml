@@ -17,7 +17,10 @@ server:
 
   # CI feedback loop: after a PR is created, wait for GitHub check events and
   # repair CI failures in the reused sandbox. No polling — GitHub webhooks
-  # (check_suite / check_run) drive the watch via /webhook/github.
+  # (check_suite / check_run completed) drive the verdict via /webhook/github.
+  # ciWatchSettleInterval is the short confirm window T that converges
+  # late-registering check suites once every suite has completed; it never
+  # waits for CI to run.
   ciWatchEnabled: true
   ciWatchMaxRetries: 3
   ciWatchMaxWait: 30m
