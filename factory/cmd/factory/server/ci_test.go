@@ -6,6 +6,51 @@ import (
 	"testing"
 )
 
+func TestNextLink(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{
+			"next page",
+			`<https://api.github.com/repos/o/r/commits/abc/check-suites?page=2>; rel="next", <https://api.github.com/repos/o/r/commits/abc/check-suites?page=2>; rel="last"`,
+			"https://api.github.com/repos/o/r/commits/abc/check-suites?page=2",
+		},
+		{"last page", `<https://api.github.com/x>; rel="last"`, ""},
+		{"empty header", "", ""},
+		{"garbage", "not a link header", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nextLink(tt.header); got != tt.want {
+				t.Errorf("nextLink(%q) = %q, want %q", tt.header, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllSuitesCompleted(t *testing.T) {
+	empty := allSuitesCompleted(nil)
+	if empty {
+		t.Error("allSuitesCompleted(nil) = true, want false: an empty suite list must not be converged")
+	}
+	done := allSuitesCompleted([]CheckSuite{
+		{ID: 1, Status: "completed", Conclusion: "success"},
+		{ID: 2, Status: "completed", Conclusion: "failure"},
+	})
+	if !done {
+		t.Error("allSuitesCompleted with all completed = false, want true")
+	}
+	pending := allSuitesCompleted([]CheckSuite{
+		{ID: 1, Status: "completed", Conclusion: "success"},
+		{ID: 2, Status: "in_progress", Conclusion: ""},
+	})
+	if pending {
+		t.Error("allSuitesCompleted with in_progress = true, want false")
+	}
+}
+
 func TestJobIDFromDetailsURL(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -123,14 +168,17 @@ func TestCollectFailedJobLogsDegradesOnLogError(t *testing.T) {
 }
 
 // fakeCIClient is a test double for ciClient. Fields configure canned
-// responses; gotJobLogs records the job IDs passed to ActionsJobLogs.
+// responses; gotJobLogs records the job IDs passed to ActionsJobLogs and
+// comments records every PR comment body passed to CommentOnIssue.
 type fakeCIClient struct {
 	headSHA     string
 	runs        []CheckRun
+	suites      []CheckSuite
 	annotations map[int64][]CheckRunAnnotation
 	logs        map[int64][]byte
 	logErr      error
 	gotJobLogs  []int64
+	comments    []string
 }
 
 func (f *fakeCIClient) PullRequestHeadSHA(ctx context.Context, owner, repo string, number int) (string, error) {
@@ -139,6 +187,10 @@ func (f *fakeCIClient) PullRequestHeadSHA(ctx context.Context, owner, repo strin
 
 func (f *fakeCIClient) ListCheckRuns(ctx context.Context, owner, repo, sha string) ([]CheckRun, error) {
 	return f.runs, nil
+}
+
+func (f *fakeCIClient) ListCheckSuites(ctx context.Context, owner, repo, sha string) ([]CheckSuite, error) {
+	return f.suites, nil
 }
 
 func (f *fakeCIClient) ListCheckRunAnnotations(ctx context.Context, owner, repo string, checkRunID int64) ([]CheckRunAnnotation, error) {
@@ -151,4 +203,9 @@ func (f *fakeCIClient) ActionsJobLogs(ctx context.Context, owner, repo string, j
 		return nil, f.logErr
 	}
 	return f.logs[jobID], nil
+}
+
+func (f *fakeCIClient) CommentOnIssue(ctx context.Context, owner, repo string, number int, body string) error {
+	f.comments = append(f.comments, body)
+	return nil
 }
