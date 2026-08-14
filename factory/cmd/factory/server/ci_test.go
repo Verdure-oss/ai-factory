@@ -243,3 +243,32 @@ func TestSnippetFromLogNoFailureReturnsNil(t *testing.T) {
 		t.Errorf("snippetFromLog(clean log) = %v, want nil", got)
 	}
 }
+
+// TestBuildCIRepairInstructionsGoheaderGuidance proves a goheader failure
+// grants the repair agent a narrow permission to read one existing .go file
+// (or .golangci.yml) to copy the repo's real license header — otherwise the
+// strict no-exploration constraints lock the agent out of fixing the header.
+func TestBuildCIRepairInstructionsGoheaderGuidance(t *testing.T) {
+	snippets := []JobLogSnippet{{
+		CheckRunName: "lint",
+		Lines:        []string{"##[error]internal/ci-repro/ci_repro.go:1:1: Missed header for check (goheader)"},
+	}}
+	inst := buildCIRepairInstructions("orig", "https://github.com/o/r/pull/5", nil, snippets, true, 20)
+	if !strings.Contains(inst, "missing the repository's license header") {
+		t.Errorf("goheader guidance missing, got:\n%s", inst)
+	}
+	if !strings.Contains(inst, "copy its leading comment/license block verbatim") {
+		t.Errorf("copy-header permission missing, got:\n%s", inst)
+	}
+	if !strings.Contains(inst, "Do NOT invent a header") {
+		t.Errorf("no-invent guard missing, got:\n%s", inst)
+	}
+	// typecheck-only failures must NOT get the goheader permission.
+	inst2 := buildCIRepairInstructions("orig", "https://github.com/o/r/pull/5", nil, []JobLogSnippet{{
+		CheckRunName: "lint",
+		Lines:        []string{"cannot use \"oops\" (untyped string constant) as int value"},
+	}}, true, 20)
+	if strings.Contains(inst2, "missing the repository's license header") {
+		t.Errorf("goheader guidance wrongly present for a non-goheader failure")
+	}
+}

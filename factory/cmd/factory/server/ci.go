@@ -505,6 +505,27 @@ func isCIFailureLine(line string) bool {
 	return false
 }
 
+// goheaderImplicated reports whether the collected failure evidence points at
+// the goheader linter (a missing repository license header). When it does,
+// buildCIRepairInstructions grants the narrow permission to read one existing
+// .go file (or .golangci.yml) so the repair agent can copy the real,
+// repo-specific header instead of guessing or falling back to inventing one.
+func goheaderImplicated(logSnippets []JobLogSnippet, annotations []CheckRunAnnotation) bool {
+	for _, s := range logSnippets {
+		for _, line := range s.Lines {
+			if strings.Contains(line, "goheader") || strings.Contains(line, "Missed header") {
+				return true
+			}
+		}
+	}
+	for _, a := range annotations {
+		if strings.Contains(a.Message, "goheader") || strings.Contains(a.Message, "Missed header") {
+			return true
+		}
+	}
+	return false
+}
+
 // buildCIRepairInstructions builds the prompt fed to the coding agent when a
 // PR's CI fails: the original task, the PR URL, the exact failure excerpts
 // (job-log snippets preferred, then per-file annotations), and strict
@@ -542,6 +563,9 @@ func buildCIRepairInstructions(originalInstructions, prURL string, annotations [
 	b.WriteString("- Fix ONLY the CI failures listed above. Do NOT undo the existing implementation, do NOT redo the whole task, do NOT refactor unrelated code.\n")
 	b.WriteString("- Read ONLY the files implicated by the failure lines above. You already have the full repository context from the task execution; do NOT re-explore.\n")
 	b.WriteString("- FORBIDDEN: repository-wide searches (find . , grep -rn across the repo), reading unrelated config files (e.g. .golangci.yml unless the error explicitly names it), and re-planning the task.\n")
+	if goheaderImplicated(logSnippets, annotations) {
+		b.WriteString("- The goheader linter fails because this .go file is missing the repository's license header. The header is repo-specific and NOT included above. It IS expressly permitted to (a) read ONE existing .go file from the repository (any package that already passes lint) and copy its leading comment/license block verbatim to the TOP of the failing file, and (b) read .golangci.yml ONLY to locate the exact goheader template if copying an existing header does not satisfy it. Do NOT invent a header; copy the real one.\n")
+	}
 	if allowTestChanges {
 		b.WriteString("- You MAY modify test files if the failure is in test code (e.g. a mock missing an interface method). The goal is CI green.\n")
 	} else {
