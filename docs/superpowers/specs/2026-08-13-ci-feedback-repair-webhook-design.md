@@ -18,7 +18,7 @@ coding-agent 生成的 PR 可能无法通过目标仓库的 CI 测试。此前�
 |---|---|---|
 | 1 | 触发方式 | **webhook 事件驱动**（`check_suite` / `check_run` 事件），完全去掉轮询 |
 | 2 | 等待期间 sandbox/claim | **同步等待、占住**（同方案 A）：`executeTask` 阻塞在等待上，收到事件立即进 sandbox 修复 |
-| 3 | 绿色判定 | **纯事件 + 静默窗口**：GitHub 推事件 → 重置 60s 窗口计时器 → 窗口安静到期才做 1 次 API 评估 |
+| 3 | 绿色判定 | **事件驱动判定（取代 90s 静默时间窗口）**：收到 `check_suite completed` 事件才触发评估——拉 `check-suites` API,要求**所有 suite 均 completed 且非失败**才算绿;有 suite 未完成则继续等待下一个 completed 事件(长跑 CI 不被误判)。晚注册套件用一个**短确认窗口**（~60s,仅收敛晚到的 suite,不承担"等 CI 跑完"职责）防御。详见下方"事件驱动判定(修订版)" |
 | 4 | 事件丢失兜底 | **硬超时收场**：等待同时设 `maxWait` 硬 deadline，到期无事件则标记失败、释放 sandbox、issue 评论说明，不碰任何 GitHub API |
 | 5 | 修复输入 | **完整 job 日志**（已验证可通过 actions jobs logs API 获取，含 stack trace 与所有错误行）+ annotations + 原任务指令 |
 | 6 | 修复上下文 | **只继承主任务会话**：修复轮从主任务 dump 的 messages 开始（加载为初始上下文），轮间不累积；避免 session 因多轮修复无限膨胀 |
@@ -88,9 +88,29 @@ GitHub                              ai-factory-server
 
 ### 静默窗口（替代原 settle-window）
 
-- 每个 waiter 一个 `time.Timer`；收到匹配事件 → `timer.Reset(60s)`。
-- 到期才评估 → 惰性注册的 check-run 创建时会推 `check_run created` 事件 → 重置窗口 → 不会在它出现前误判全绿。
-- 窗口到期评估前先查 `taskExists`：任务已被取消（label 移除）则退出不修（不新增轮询，借事件时机检查）。
+> ⚠️ **已修订（2026-08-14）**：本节原设计的"90s 静默到期才评估"有一个真实 bug——**长 CI 流程会被误判失败**。CI 的 job 在 `in_progress` 期间不发事件（事件只在 queued/in_progress/completed 三刻推），若某 job 跑 >90s,原逻辑在 90s 静默到期时评估,发现仍有 in_progress run 返回 Pending,而 `watchAndRepairCI` 把 Pending 直接当失败收场。**时间窗口必须不承担"等 CI 跑完"的职责**。修订方案见下节。
+
+### 事件驱动判定（修订版,取代时间窗口）
+
+每次 goto 由 `check_suite completed` 事件驱动,不做时间倒计时等待:
+
+```
+check_suite completed 事件到达
+   └─ 拉 check-suites API → 是否所有 suite 均已 completed?
+        ├─ 有 suite 未 completed → 继续等下一个 completed 事件(不设时间上限)
+        └─ 全部 completed:
+             记录当前 suite id 集合 S
+             └─ 启动一次性短确认窗口 T(~60s),仅用于收敛晚注册套件:
+                  - T 内来了新 suite 的 completed 事件 → 回到全部检查
+                    (集合出现新成员,需要重新收敛)
+                  - T 内无事 → 判定绿(全非失败)或红(任一失败/action_required)
+```
+
+- **判定触发器**:`90s 静默到期` → `check_suite completed 事件`
+- **判定标准**:check-runs 全绿 → **check-suites 全部 completed 且非失败**(套件级权威,防御懒注册误判绿)
+- **确认窗口 T**:只收敛晚注册套件,不承担"等 CI 跑完"
+- **maxWait(30m)**:仅兜底事件流整体断供时收场,正常长 CI 不触发
+- **webhook 订阅**:目标仓库须同时开启 **Check suites** 与 **Check runs** 两种事件(Check suites 提供收敛信号;Check runs 作为 fork 无 head_branch 场景的兜底闹钟)
 
 ### 事件处理
 
@@ -133,7 +153,6 @@ GitHub                              ai-factory-server
 
 ## 后续讨论空间
 
-- 静默窗口时长、`maxWait` 取值是否合理
-- 是否保留"窗口到期后的最终一次 API 评估"（当前 yes，否则纯事件无法收敛）
-- `AI_FACTORY_SESSION_FILE` 的 token 成本（继承的 messages 全量重放给每轮修复请求）
+- ~~静默窗口时长~~（已修订:时间窗口不再承担"等 CI 跑完"职责,改为事件驱动判定 + 短收敛窗口）
 - GitLab 侧暂不覆盖（GitLab MR CI 事件后续单独设计）
+- 实现变更点：`GitHubClient` 加 `ListCheckSuites`；`waitForCIEvent` 从时间驱动改为 suite-completed 事件驱动；判定改走 check-suites 集合收敛 + 短确认窗口
