@@ -75,6 +75,7 @@ COPY ai-factory-agent.py /usr/local/bin/ai-factory-agent.py
 COPY agent_budget.py /usr/local/bin/agent_budget.py
 COPY agent_config.py /usr/local/bin/agent_config.py
 COPY agent_images.py /usr/local/bin/agent_images.py
+COPY agent_session.py /usr/local/bin/agent_session.py
 COPY repair_loop.py /usr/local/bin/repair_loop.py
 COPY repair_prompt.py /usr/local/bin/repair_prompt.py
 COPY script_validation.py /usr/local/bin/script_validation.py
@@ -85,11 +86,12 @@ RUN sed -i 's/\r$//' /usr/local/bin/ai-factory-agent \
     /usr/local/bin/agent_budget.py \
     /usr/local/bin/agent_config.py \
     /usr/local/bin/agent_images.py \
+    /usr/local/bin/agent_session.py \
     /usr/local/bin/repair_loop.py \
     /usr/local/bin/repair_prompt.py \
     /usr/local/bin/script_validation.py
 
-RUN chmod 755 /usr/local/bin/ai-factory-agent /usr/local/bin/ai-factory-agent.py /usr/local/bin/agent_budget.py /usr/local/bin/agent_config.py /usr/local/bin/agent_images.py /usr/local/bin/repair_loop.py /usr/local/bin/script_validation.py /usr/local/bin/ai-factory-sandbox-entrypoint \
+RUN chmod 755 /usr/local/bin/ai-factory-agent /usr/local/bin/ai-factory-agent.py /usr/local/bin/agent_budget.py /usr/local/bin/agent_config.py /usr/local/bin/agent_images.py /usr/local/bin/agent_session.py /usr/local/bin/repair_loop.py /usr/local/bin/script_validation.py /usr/local/bin/ai-factory-sandbox-entrypoint \
     && useradd --create-home --home-dir "${HOME}" --shell /bin/bash agent \
     && mkdir -p "${WORKSPACE}" \
     && chown -R agent:agent "${HOME}" "${WORKSPACE}"

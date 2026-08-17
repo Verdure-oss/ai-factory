@@ -25,6 +25,12 @@ from agent_budget import (
     PhaseRoundBudget,
     post_chat_completion,
 )
+from agent_session import (
+    build_session_snapshot,
+    collect_git_snapshot,
+    render_session_snapshot,
+    session_file_is_readonly,
+)
 from repair_loop import RepairCandidate, RepairLoopTerminated, run_repair_loop
 from agent_config import (
     AgentConfiguration,
@@ -295,7 +301,11 @@ if session_file:
     try:
         with open(session_file, "r", encoding="utf-8") as session_handle:
             loaded = json.load(session_handle)
-        if isinstance(loaded, list) and loaded and isinstance(loaded[0], dict):
+        if isinstance(loaded, dict):
+            # New snapshot format (main task collapsed to the essentials a
+            # repair round needs); render it into starting messages.
+            session_messages = render_session_snapshot(loaded)
+        elif isinstance(loaded, list) and loaded and isinstance(loaded[0], dict):
             session_messages = loaded
     except (OSError, ValueError, TypeError):
         # Missing/corrupt session file: proceed with a fresh conversation.
@@ -410,10 +420,19 @@ def persist_session():
     # task's dumped snapshot but must not write their own session back, or the
     # shared file accumulates round-over-round and overflows the API input
     # window by the third repair. The main task (var unset) dumps once.
-    if os.environ.get("AI_FACTORY_SESSION_READONLY", "").strip() not in ("", "0", "false"):
+    if session_file_is_readonly():
         return
     try:
-        raw = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+        # The main task dumps a compact snapshot instead of the raw transcript:
+        # task instructions, the files it changed (git diff HEAD), and its final
+        # script. The full exploration history (~40 tool rounds of raw output)
+        # is deliberately dropped — it bloats every repair request and lets a
+        # repair agent replay a stale edit instead of fixing the next CI error.
+        snapshot = build_session_snapshot(messages)
+        files, change_stat = collect_git_snapshot()
+        snapshot["changed_files"] = files
+        snapshot["changed_stat"] = change_stat
+        raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
         with open(session_file, "w", encoding="utf-8") as session_handle:
             session_handle.write(redact(raw))
     except (OSError, TypeError):
