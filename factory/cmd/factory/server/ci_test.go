@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -170,7 +171,12 @@ func TestCollectFailedJobLogsDegradesOnLogError(t *testing.T) {
 // fakeCIClient is a test double for ciClient. Fields configure canned
 // responses; gotJobLogs records the job IDs passed to ActionsJobLogs and
 // comments records every PR comment body passed to CommentOnIssue.
+//
+// mu guards the canned state (headSHA/suites/runs) because the CI watch loop
+// reads it from a goroutine while the test goroutine advances the simulation
+// between wakes; use setHeadSHA/setSuites to mutate.
 type fakeCIClient struct {
+	mu          sync.Mutex
 	headSHA     string
 	runs        []CheckRun
 	suites      []CheckSuite
@@ -181,15 +187,33 @@ type fakeCIClient struct {
 	comments    []string
 }
 
+func (f *fakeCIClient) setHeadSHA(v string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.headSHA = v
+}
+
+func (f *fakeCIClient) setSuites(v []CheckSuite) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.suites = v
+}
+
 func (f *fakeCIClient) PullRequestHeadSHA(ctx context.Context, owner, repo string, number int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.headSHA, nil
 }
 
 func (f *fakeCIClient) ListCheckRuns(ctx context.Context, owner, repo, sha string) ([]CheckRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.runs, nil
 }
 
 func (f *fakeCIClient) ListCheckSuites(ctx context.Context, owner, repo, sha string) ([]CheckSuite, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.suites, nil
 }
 

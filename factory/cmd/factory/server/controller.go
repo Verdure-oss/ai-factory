@@ -920,9 +920,19 @@ const (
 // pass is needed is decided by the next CI evaluation.
 type ciRepairRunner func(annotations []CheckRunAnnotation, logSnippets []JobLogSnippet) error
 
+// ciNotify is a webhook wake delivered to a CI watch loop. headSHA is the head
+// commit the event's verdict belongs to, taken straight from the webhook
+// payload (GitHub-pushed, so immune to the PR-head reflection lag that makes
+// PullRequestHeadSHA return a superseded sha right after a repair force-push).
+// It is empty when the event carried no head_sha (defensive fallback), in which
+// case the waiter falls back to evaluating its own PR head.
+type ciNotify struct {
+	headSHA string
+}
+
 // ciWaiter lets a webhook handler signal a blocked watch loop.
 type ciWaiter struct {
-	notify chan struct{}
+	notify chan ciNotify
 }
 
 var (
@@ -936,7 +946,7 @@ var (
 func registerWaiter(key string) *ciWaiter {
 	ciRegistryMu.Lock()
 	defer ciRegistryMu.Unlock()
-	w := &ciWaiter{notify: make(chan struct{}, 1)}
+	w := &ciWaiter{notify: make(chan ciNotify, 1)}
 	ciRegistry[key] = w
 	return w
 }
@@ -949,9 +959,10 @@ func unregisterWaiter(key string) {
 	delete(ciRegistry, key)
 }
 
-// notifyWaiter wakes the waiter for key without blocking. It is a no-op when
-// no watch loop is registered for the key (already finished, or no loop yet).
-func notifyWaiter(key string) {
+// notifyWaiter wakes the waiter for key without blocking. headSHA is the commit
+// the event's verdict belongs to ("" when unknown). It is a no-op when no watch
+// loop is registered for the key (already finished, or no loop yet).
+func notifyWaiter(key string, headSHA string) {
 	ciRegistryMu.Lock()
 	w := ciRegistry[key]
 	ciRegistryMu.Unlock()
@@ -959,17 +970,18 @@ func notifyWaiter(key string) {
 		return
 	}
 	select {
-	case w.notify <- struct{}{}:
+	case w.notify <- ciNotify{headSHA: headSHA}:
 	default:
 	}
 }
 
 // notifyWaitersForRepo wakes every waiter registered under a repo prefix (e.g.
-// "owner/repo/"). Used when a check_run event carries no head_branch: the
-// branch key is unavailable, so we wake all watchers for the repo. A spurious
-// wake only triggers one quiet-window evaluation against each waiter's own PR
-// head, which stays correct — it can never misjudge, only waste one API call.
-func notifyWaitersForRepo(repoPrefix string) {
+// "owner/repo/") with the event's headSHA. Used when a check_run event carries
+// no head_branch: the branch key is unavailable, so we wake all watchers for
+// the repo. The head_sha gate in waitForCIEvent keeps each waiter evaluating
+// only events belonging to its own PR head — a spurious wake for another
+// branch/commit is ignored, never misjudged.
+func notifyWaitersForRepo(repoPrefix string, headSHA string) {
 	ciRegistryMu.Lock()
 	wake := make([]*ciWaiter, 0, 4)
 	for key, w := range ciRegistry {
@@ -980,7 +992,7 @@ func notifyWaitersForRepo(repoPrefix string) {
 	ciRegistryMu.Unlock()
 	for _, w := range wake {
 		select {
-		case w.notify <- struct{}{}:
+		case w.notify <- ciNotify{headSHA: headSHA}:
 		default:
 		}
 	}
@@ -1034,7 +1046,11 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 
 	for attempt := 0; attempt < opts.maxRetries; attempt++ {
 		fmt.Fprintf(out, "--- CI watch attempt %d/%d waiting for events on %s\n", attempt+1, opts.maxRetries, key)
-		status, summary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, deadline)
+		// bootstrap only on the first pass: the PR's CI may already have
+		// finished before the waiter registered. Repair passes are purely
+		// event-driven — a snapshot right after a force-push could re-read the
+		// superseded commit's failing suites and trigger a regressive repair.
+		status, summary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, deadline, attempt == 0)
 		lastSummary = summary
 		switch status {
 		case ciCheckGreen:
@@ -1102,37 +1118,45 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 //   - maxWait only bounds total event-stream loss (webhook unconfigured/
 //     unreachable); long-running CI is not affected by it.
 //
+// Fresh-guard and stale-event gating: the PR-8 regression (a repair round
+// "fixing" code back to a broken state on stale evidence) came from evaluating
+// on a bootstrapped snapshot of the OLD commit after a repair force-push, when
+// GitHub's PR-head reflection still reported the superseded sha. Two guards
+// close it:
+//
+//   - bootstrap snapshots happen only on the FIRST call (the PR just created;
+//     CI may have already finished before the waiter registered). Repair-round
+//     calls are purely event-driven — no snapshot can judge red.
+//   - Each wake carries the event's head_sha. A wake is only evaluated when
+//     that sha equals the current PR head (or the event carries no sha); a late
+//     event for a superseded commit is ignored. Evidence is thus always scoped
+//     to the commit the event actually finished, never to the reflected head.
+//
 // task is used only for the cancellation check (taskExists) at the observation
 // point — the loop never polls for it.
-func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient, owner, repo string, number int, w *ciWaiter, opts ciWatchOptions, deadline time.Time) (ciCheckStatus, string) {
+func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient, owner, repo string, number int, w *ciWaiter, opts ciWatchOptions, deadline time.Time, bootstrap bool) (ciCheckStatus, string) {
 	// known is the suite id set captured when the confirm window started; a
 	// membership change means a late suite registered and we must re-converge.
 	var known map[int64]bool
 	var confirm *time.Timer
 	var confirmC <-chan time.Time
 
-	list := func() ([]CheckSuite, string, error) {
-		// Re-fetch the PR head on every evaluation in case a repair
-		// force-push advanced the branch between attempts.
-		refreshed, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+	// listAt returns the suites belonging to head (the current PR head as seen
+	// by the caller when it resolved it). Only suites whose HeadSHA matches
+	// head count: after a repair force-push, the API can still briefly return
+	// the previous commit's failing suites; feeding those to fastRed/
+	// allCompleted would re-trigger red on evidence from an already-superseded
+	// commit and cause a repair round to "regress" the fix. A suite with HeadSHA
+	// empty (defensive) matches nothing and is dropped, so an unborn suite set
+	// reads as "not converged" until the new head's suites appear.
+	listAt := func(head string) ([]CheckSuite, string, error) {
+		suites, err := gh.ListCheckSuites(ctx, owner, repo, head)
 		if err != nil {
 			return nil, "", err
 		}
-		suites, err := gh.ListCheckSuites(ctx, owner, repo, refreshed)
-		if err != nil {
-			return nil, "", err
-		}
-		// Only suites belonging to the current PR head count. After a repair
-		// force-push, the API can still briefly return the previous commit's
-		// failing suites; feeding those to fastRed/allCompleted would
-		// re-trigger red on evidence from an already-superseded commit and
-		// cause a repair round to "regress" the fix. A suite with HeadSHA
-		// empty (defensive) matches nothing and is dropped, so an unborn
-		// suite set reads as "not converged" until the new head's suites
-		// appear.
 		filtered := make([]CheckSuite, 0, len(suites))
 		for _, s := range suites {
-			if s.HeadSHA == refreshed {
+			if s.HeadSHA == head {
 				filtered = append(filtered, s)
 			}
 		}
@@ -1157,30 +1181,68 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 		known = nil
 	}
 
-	// One bootstrap snapshot: the CI may already have finished before our
-	// waiter registered (all events fired during setup). Without this the loop
-	// would wait for a completed event that will never come. A single
-	// snapshot is not polling.
-	suites, summary, err := list()
-	if err != nil {
-		return ciCheckError, fmt.Sprintf("list check suites: %v", err)
-	}
-	if fastRedSuites(suites) {
-		return ciCheckRed, summary
-	}
-	if allSuitesCompleted(suites) {
-		startConfirm(suites)
+	// One bootstrap snapshot, first call only: the CI may already have finished
+	// before our waiter registered (all events fired during setup). Without this
+	// the loop would wait for a completed event that will never come. Repair
+	// rounds (bootstrap=false) must never take a snapshot — after a force-push
+	// the reflected head may still be the old commit, whose failing suites would
+	// instantly judge red on stale evidence (the PR 8 regression).
+	if bootstrap {
+		head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+		if err != nil {
+			return ciCheckError, fmt.Sprintf("get PR head sha: %v", err)
+		}
+		suites, summary, err := listAt(head)
+		if err != nil {
+			return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+		}
+		if fastRedSuites(suites) {
+			return ciCheckRed, summary
+		}
+		if allSuitesCompleted(suites) {
+			startConfirm(suites)
+		}
 	}
 
 	for {
 		select {
-		case <-w.notify:
-			// An event arrived: re-evaluate the current head's suites.
-			suites, summary, err := list()
+		case n := <-w.notify:
+			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
 			if err != nil {
-				return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+				// Transient API error on a wake: keep waiting for the next
+				// event rather than fail the watch on a blip.
+				continue
+			}
+			if n.headSHA != "" && head != n.headSHA {
+				// The event is a verdict for a commit that is not the current PR
+				// head: a late event for the superseded commit (arriving after a
+				// repair force-push) or a repo-wide wake for another branch.
+				// Evaluating it would hand the repair agent stale evidence that
+				// an already-superseded commit failed (the PR 8 regression).
+				// Skip; the current head's own completed events will arrive and
+				// match.
+				continue
+			}
+			suites, summary, err := listAt(head)
+			if err != nil {
+				continue
 			}
 			if fastRedSuites(suites) {
+				if !bootstrap {
+					// Repair round: never fast-judge red. While the PR-head
+					// reflection lags right after a push, a late event for the
+					// superseded commit can carry the same head_sha as the
+					// lagging reflected head, so head equality alone is not
+					// proof the verdict is current. Defer to the confirm
+					// window: if the re-pushed commit's own events arrive (they
+					// always do — the new CI produces its own completed
+					// events), they carry a different head and supersede this
+					// stale one before it can be judged.
+					if confirmC == nil {
+						startConfirm(suites)
+					}
+					continue
+				}
 				stopConfirm()
 				return ciCheckRed, summary
 			}
@@ -1200,7 +1262,11 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 			// Otherwise the window stays running untouched.
 		case <-confirmC:
 			// Window elapsed with no membership change: final convergence check.
-			suites, summary, err := list()
+			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if err != nil {
+				return ciCheckError, fmt.Sprintf("get PR head sha: %v", err)
+			}
+			suites, summary, err := listAt(head)
 			if err != nil {
 				return ciCheckError, fmt.Sprintf("list check suites: %v", err)
 			}

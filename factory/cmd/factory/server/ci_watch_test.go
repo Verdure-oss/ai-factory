@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func ciWatchOptsForTest() ciWatchOptions {
 	}
 }
 
-func runWaitForCIEvent(t *testing.T, fake *fakeCIClient, key string) chan ciWaitResult {
+func runWaitForCIEvent(t *testing.T, fake *fakeCIClient, key string, bootstrap bool) chan ciWaitResult {
 	t.Helper()
 	w := registerWaiter(key)
 	t.Cleanup(func() { unregisterWaiter(key) })
@@ -51,7 +52,7 @@ func runWaitForCIEvent(t *testing.T, fake *fakeCIClient, key string) chan ciWait
 	opts := ciWatchOptsForTest()
 	done := make(chan ciWaitResult, 1)
 	go func() {
-		status, summary := waitForCIEvent(context.Background(), task, fake, "owner", "repo", 42, w, opts, time.Now().Add(opts.maxWait))
+		status, summary := waitForCIEvent(context.Background(), task, fake, "owner", "repo", 42, w, opts, time.Now().Add(opts.maxWait), bootstrap)
 		done <- ciWaitResult{status: status, summary: summary}
 	}()
 	return done
@@ -70,7 +71,7 @@ func TestWaitForCIEventGreenAfterBootstrap(t *testing.T) {
 			{ID: 2, Status: "completed", Conclusion: "neutral", HeadSHA: "abc123"},
 		},
 	}
-	done := runWaitForCIEvent(t, fake, key)
+	done := runWaitForCIEvent(t, fake, key, true)
 	select {
 	case r := <-done:
 		if r.status != ciCheckGreen {
@@ -88,10 +89,10 @@ func TestWaitForCIEventEmptySuitesIsNotGreen(t *testing.T) {
 	withTaskExists(t, true)
 	const key = "owner/repo/factory-task/github-owner-repo-42"
 	fake := &fakeCIClient{headSHA: "abc123"} // no suites at all
-	done := runWaitForCIEvent(t, fake, key)
+	done := runWaitForCIEvent(t, fake, key, true)
 
 	// A wake with still-zero suites must not conclude anything.
-	notifyWaiter(key)
+	notifyWaiter(key, "abc123")
 	select {
 	case r := <-done:
 		t.Fatalf("waitForCIEvent returned %v (summary %q) for an empty suite list; zero suites must not be green", r.status, r.summary)
@@ -99,8 +100,8 @@ func TestWaitForCIEventEmptySuitesIsNotGreen(t *testing.T) {
 		// Still waiting — correct: not converged.
 	}
 
-	fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}}
-	notifyWaiter(key)
+	fake.setSuites([]CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}})
+	notifyWaiter(key, "abc123")
 	select {
 	case r := <-done:
 		if r.status != ciCheckGreen {
@@ -122,12 +123,12 @@ func TestWaitForCIEventPendingUntilComplete(t *testing.T) {
 		headSHA: "abc123",
 		suites:  []CheckSuite{{ID: 1, Status: "in_progress", Conclusion: "", HeadSHA: "abc123"}},
 	}
-	done := runWaitForCIEvent(t, fake, key)
+	done := runWaitForCIEvent(t, fake, key, true)
 
 	// Wake repeatedly while still pending; the loop must keep waiting (this is
 	// the old bug: a settle timer would wrongly fire and judge Pending=fail).
 	for i := 0; i < 3; i++ {
-		notifyWaiter(key)
+		notifyWaiter(key, "abc123")
 		select {
 		case r := <-done:
 			t.Fatalf("waitForCIEvent returned %v (summary %q) while suites were still in_progress", r.status, r.summary)
@@ -136,8 +137,8 @@ func TestWaitForCIEventPendingUntilComplete(t *testing.T) {
 	}
 
 	// Now the long job finishes; the next wake starts the confirm window.
-	fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}}
-	notifyWaiter(key)
+	fake.setSuites([]CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}})
+	notifyWaiter(key, "abc123")
 	select {
 	case r := <-done:
 		if r.status != ciCheckGreen {
@@ -161,7 +162,7 @@ func TestWaitForCIEventFailsFastOnCompletedFailure(t *testing.T) {
 			{ID: 2, Status: "in_progress", Conclusion: ""},
 		},
 	}
-	done := runWaitForCIEvent(t, fake, key)
+	done := runWaitForCIEvent(t, fake, key, true)
 	select {
 	case r := <-done:
 		if r.status != ciCheckRed {
@@ -172,9 +173,29 @@ func TestWaitForCIEventFailsFastOnCompletedFailure(t *testing.T) {
 	}
 }
 
+// autoNotifyWaiter simulates the webhook event stream a re-pushed repair
+// commit generates: it keeps waking the waiter registered by watchAndRepairCI
+// for the task's branch with headSHA, so repair-round waits (which are purely
+// event-driven) can evaluate. notifyWaiter no-ops once the watch unregisters.
+// stopAfter bounds the goroutine so a test that fails early does not leak it.
+func autoNotifyWaiter(task *taskpkg.FactoryTask, owner, repo, headSHA string, interval, stopAfter time.Duration) {
+	changeBranch, _ := changeRequestBranches(task)
+	key := fmt.Sprintf("%s/%s/%s", owner, repo, changeBranch)
+	stop := time.Now().Add(stopAfter)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for time.Now().Before(stop) {
+			<-ticker.C
+			notifyWaiter(key, headSHA)
+		}
+	}()
+}
+
 // TestWatchAndRepairCICommentsPRStartAndEnd proves watchAndRepairCI posts the
 // start comment once on the first failure and the aggregate result comment on
-// exit: first round fails and is repaired, second round converges green.
+// exit: first round fails and is repaired, second round converges green (the
+// repair push's webhook events drive the round — no bootstrap snapshot).
 func TestWatchAndRepairCICommentsPRStartAndEnd(t *testing.T) {
 	withTaskExists(t, true)
 	fake := &fakeCIClient{
@@ -185,12 +206,15 @@ func TestWatchAndRepairCICommentsPRStartAndEnd(t *testing.T) {
 	repair := func([]CheckRunAnnotation, []JobLogSnippet) error {
 		repairRounds++
 		// A successful repair makes CI green on the next evaluation.
-		fake.suites = []CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}}
+		fake.setSuites([]CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}})
 		return nil
 	}
 	task := &taskpkg.FactoryTask{
 		Metadata: taskpkg.ObjectMeta{Name: "github-owner-repo-42", Namespace: "default"},
 	}
+	// After the repair force-push, the re-pushed commit's completed events drive
+	// the round-2 evaluation.
+	autoNotifyWaiter(task, "owner", "repo", "abc123", 30*time.Millisecond, 3*time.Second)
 	var out strings.Builder
 	outcome, summary := watchAndRepairCI(&out, task, "https://github.com/owner/repo/pull/42", fake, repair, ciWatchOptsForTest())
 	if outcome != ciWatchGreen {
@@ -228,6 +252,9 @@ func TestWatchAndRepairCIContinuesAfterRepairFailure(t *testing.T) {
 	task := &taskpkg.FactoryTask{
 		Metadata: taskpkg.ObjectMeta{Name: "github-owner-repo-42", Namespace: "default"},
 	}
+	// Each failing wait is re-woken by the simulated re-push event stream; the
+	// failing suites keep judging red, so the watch burns all maxRetries.
+	autoNotifyWaiter(task, "owner", "repo", "abc123", 30*time.Millisecond, 3*time.Second)
 	var out strings.Builder
 	outcome, summary := watchAndRepairCI(&out, task, "https://github.com/owner/repo/pull/42", fake, repair, ciWatchOptsForTest())
 	if outcome != ciWatchFailed {
@@ -265,7 +292,7 @@ func TestWaitForCIEventIgnoresStaleSuites(t *testing.T) {
 			{ID: 2, Status: "in_progress", Conclusion: "", HeadSHA: "abc123"},
 		},
 	}
-	done := runWaitForCIEvent(t, fake, key)
+	done := runWaitForCIEvent(t, fake, key, true)
 	// The stale failure must not settle red; and with the live suite
 	// in_progress we keep waiting.
 	select {
@@ -276,11 +303,11 @@ func TestWaitForCIEventIgnoresStaleSuites(t *testing.T) {
 	}
 
 	// Now the current-head suite completes successfully: green.
-	fake.suites = []CheckSuite{
+	fake.setSuites([]CheckSuite{
 		{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "olddeadbeef"},
 		{ID: 2, Status: "completed", Conclusion: "success", HeadSHA: "abc123"},
-	}
-	notifyWaiter(key)
+	})
+	notifyWaiter(key, "abc123")
 	select {
 	case r := <-done:
 		if r.status != ciCheckGreen {
@@ -306,12 +333,85 @@ func TestWaitForCIEventAllSuitesStaleIsNotConverged(t *testing.T) {
 			{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "olddeadbeef"},
 		},
 	}
-	done := runWaitForCIEvent(t, fake, key)
-	notifyWaiter(key)
+	done := runWaitForCIEvent(t, fake, key, true)
+	notifyWaiter(key, "abc123")
 	select {
 	case r := <-done:
 		t.Fatalf("waitForCIEvent returned %v (summary %q) with only stale suites; empty filtered set must not be green", r.status, r.summary)
 	case <-time.After(400 * time.Millisecond):
 		// Correct: not converged.
+	}
+}
+
+// TestWaitForCIEventRepairRoundIgnoresStaleEvidence reproduces the PR 8
+// regression: after a repair force-push the PR-head reflection lags, so a
+// repair-round wait (bootstrap=false) must not snapshot-judge, and must not
+// fast-judge red from evidence of the superseded commit. The current head's own
+// events supersede the stale evidence and converge the verdict.
+func TestWaitForCIEventRepairRoundIgnoresStaleEvidence(t *testing.T) {
+	withTaskExists(t, true)
+	const key = "owner/repo/factory-task/github-owner-repo-42"
+	// The API still reports the OLD commit's failing suites under its (lagging)
+	// head — the exact state that made PR 8 repair round 2 seize on stale
+	// evidence and flip return 0 back to return "oops".
+	fake := &fakeCIClient{
+		headSHA: "olddeadbeef", // reflected head lags behind the force-push
+		suites: []CheckSuite{
+			{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "olddeadbeef"},
+		},
+	}
+	done := runWaitForCIEvent(t, fake, key, false /* repair round: no bootstrap */)
+
+	// 1. No bootstrap snapshot: the stale failing suite list must NOT judge red
+	//    by itself — the wait is purely event-driven.
+	select {
+	case r := <-done:
+		t.Fatalf("repair-round waitForCIEvent returned %v (summary %q) without any event; a stale bootstrap must not judge red", r.status, r.summary)
+	case <-time.After(250 * time.Millisecond):
+		// Correct: still waiting.
+	}
+
+	// 2. A late event for the (lagging) old head must not be FAST-judged red:
+	//    its verdict is deferred to the confirm window so a genuine re-push
+	//    event can supersede it. No conclusion within a short spell proves the
+	//    repair-round fast path is disabled.
+	notifyWaiter(key, "olddeadbeef")
+	select {
+	case r := <-done:
+		t.Fatalf("repair-round waitForCIEvent returned %v (summary %q) immediately on an old-head event; the verdict must be deferred to the window", r.status, r.summary)
+	case <-time.After(40 * time.Millisecond):
+		// Correct: still deferred (window is 100ms in this test's options).
+	}
+
+	// 3. The reflection catches up to the fixed commit; its in_progress event
+	//    arrives with a DIFFERENT head, superseding the stale window and (since
+	//    the new head is not converged) keeping the loop waiting.
+	fake.setHeadSHA("newfixed")
+	fake.setSuites([]CheckSuite{
+		{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "olddeadbeef"},
+		{ID: 2, Status: "in_progress", Conclusion: "", HeadSHA: "newfixed"},
+	})
+	notifyWaiter(key, "newfixed")
+	select {
+	case r := <-done:
+		t.Fatalf("waitForCIEvent returned %v (summary %q) with the current head still in_progress", r.status, r.summary)
+	case <-time.After(60 * time.Millisecond):
+		// Correct: superseded the stale window; the current head is not converged.
+	}
+
+	// 4. The current head's suite completes successfully: the matching event
+	//    converges green. The superseded old-head failure never judged.
+	fake.setSuites([]CheckSuite{
+		{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "olddeadbeef"},
+		{ID: 2, Status: "completed", Conclusion: "success", HeadSHA: "newfixed"},
+	})
+	notifyWaiter(key, "newfixed")
+	select {
+	case r := <-done:
+		if r.status != ciCheckGreen {
+			t.Fatalf("status = %v (summary %q), want ciCheckGreen", r.status, r.summary)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not converge green after the current head's suites completed")
 	}
 }

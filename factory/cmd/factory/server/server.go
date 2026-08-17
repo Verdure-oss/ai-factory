@@ -198,11 +198,11 @@ func ciWebhookHandler(cmd *cobra.Command) http.HandlerFunc {
 			return
 		}
 		eventType := req.Header.Get("X-GitHub-Event")
-		var owner, repo, branch string
+		var owner, repo, branch, headSHA string
 		if eventType == "check_suite" {
-			owner, repo, branch, _, err = parseCheckSuiteEvent(body)
+			owner, repo, branch, headSHA, err = parseCheckSuiteEvent(body)
 		} else {
-			owner, repo, branch, _, err = parseCheckRunEvent(body)
+			owner, repo, branch, headSHA, err = parseCheckRunEvent(body)
 		}
 		if err != nil {
 			w.WriteHeader(http.StatusNoContent)
@@ -211,14 +211,15 @@ func ciWebhookHandler(cmd *cobra.Command) http.HandlerFunc {
 		if branch == "" {
 			// GitHub omits head_branch on some check_run events (PR head from a
 			// fork). Wake every waiter for this repo instead; evaluation is
-			// scoped to each waiter's own PR head so this stays correct.
-			fmt.Fprintf(cmd.ErrOrStderr(), "ci webhook: %s event for %s/%s (no branch); waking repo waiters\n", eventType, owner, repo)
-			notifyWaitersForRepo(fmt.Sprintf("%s/%s/", owner, repo))
+			// scoped to each waiter's own PR head (and the event's head_sha, when
+			// present) so this stays correct.
+			fmt.Fprintf(cmd.ErrOrStderr(), "ci webhook: %s event for %s/%s (no branch, head=%s); waking repo waiters\n", eventType, owner, repo, headSHA)
+			notifyWaitersForRepo(fmt.Sprintf("%s/%s/", owner, repo), headSHA)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "ci webhook: %s event for %s/%s@%s\n", eventType, owner, repo, branch)
-		notifyWaiter(fmt.Sprintf("%s/%s/%s", owner, repo, branch))
+		fmt.Fprintf(cmd.ErrOrStderr(), "ci webhook: %s event for %s/%s@%s (head=%s)\n", eventType, owner, repo, branch, headSHA)
+		notifyWaiter(fmt.Sprintf("%s/%s/%s", owner, repo, branch), headSHA)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -229,6 +230,12 @@ type ciEventPayload struct {
 	Action string `json:"action"`
 	CheckSuite struct {
 		HeadBranch string `json:"head_branch"`
+		// HeadSHA is authoritative for check_suite events. It comes straight
+		// from the event payload — GitHub-pushed the instant the suite verdict
+		// landed — so it is immune to the PR-head reflection lag that makes
+		// PullRequestHeadSHA return a superseded sha right after a repair
+		// force-push.
+		HeadSHA string `json:"head_sha"`
 	} `json:"check_suite"`
 	CheckRun struct {
 		HeadSHA string `json:"head_sha"`
@@ -257,7 +264,9 @@ func parseCheckRunEvent(body []byte) (owner, repo, branch, headSHA string, err e
 // parseCIEvent extracts owner/repo/branch/headSHA from a check_suite or
 // check_run webhook payload. When completedOnly is true (both event types are
 // consumed this way), only events with action "completed" are accepted;
-// queued/in_progress/requested_action events are ignored.
+// queued/in_progress/requested_action events are ignored. headSHA is the
+// event's own head_sha (check_suite top-level, else check_run), never re-fetched,
+// so it is not blurred by GitHub PR-head reflection.
 func parseCIEvent(body []byte, completedOnly bool) (owner, repo, branch, headSHA string, err error) {
 	var ev ciEventPayload
 	if err := json.Unmarshal(body, &ev); err != nil {
@@ -268,11 +277,15 @@ func parseCIEvent(body []byte, completedOnly bool) (owner, repo, branch, headSHA
 	if completedOnly && ev.Action != "completed" {
 		return "", "", "", "", fmt.Errorf("ignoring CI event action %q", ev.Action)
 	}
+	headSHA = ev.CheckRun.HeadSHA
+	if headSHA == "" {
+		headSHA = ev.CheckSuite.HeadSHA
+	}
 	parts := strings.SplitN(ev.Repository.FullName, "/", 2)
 	if len(parts) != 2 {
 		return "", "", "", "", fmt.Errorf("repository.full_name %q", ev.Repository.FullName)
 	}
-	return parts[0], parts[1], ev.CheckSuite.HeadBranch, ev.CheckRun.HeadSHA, nil
+	return parts[0], parts[1], ev.CheckSuite.HeadBranch, headSHA, nil
 }
 
 func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
