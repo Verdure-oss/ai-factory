@@ -298,6 +298,39 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertIn("final-reasoning-two", completed.stderr)
         self.assertEqual(len(server.requests), 3)
 
+    def test_inherited_session_keeps_current_prompt(self):
+        # A repair round inherits the main task's session snapshot AND must still
+        # receive its own prompt (the CI failure evidence). This was a real bug:
+        # user_content was only appended when the session was empty, so a repair
+        # round inherited the main task's memory with no idea what to fix now.
+        snapshot = {
+            "task_instructions": "create a broken file",
+            "changed_files": ["internal/ci-repro/ci_repro.go"],
+            "changed_stat": "1 file changed, 1 insertion(+)",
+            "final_script": "cat > internal/ci-repro/ci_repro.go <<EOF ...",
+        }
+        with completion_server([completion("#!/bin/sh\necho repair-success\\n")]) as server:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                session_path = Path(temp_dir) / "session.json"
+                session_path.write_text(json.dumps(snapshot), encoding="utf-8")
+                completed = self.run_agent(
+                    server,
+                    prompt="FIX THE CI FAILURES: goheader and typecheck on internal/ci-repro/ci_repro.go",
+                    AI_FACTORY_SESSION_FILE=str(session_path),
+                    AI_FACTORY_SESSION_READONLY="1",
+                )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        messages = server.requests[0]["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        rendered = "".join(m.get("content", "") for m in messages)
+        # Inherited memory is present ...
+        self.assertIn("create a broken file", rendered)
+        # ... and so is the current repair prompt (the regression this test pins).
+        self.assertIn("FIX THE CI FAILURES: goheader and typecheck", rendered)
+        self.assertEqual(messages[-1]["role"], "user")
+        self.assertIn("FIX THE CI FAILURES: goheader and typecheck", messages[-1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

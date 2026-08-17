@@ -343,8 +343,15 @@ if not messages:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
-elif messages and messages[0].get("role") != "system":
-    messages.insert(0, {"role": "system", "content": system_prompt})
+else:
+    if messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": system_prompt})
+    # The current prompt is the task this process must do: for a repair round it
+    # carries the CI failure evidence. It must never be dropped just because a
+    # session snapshot was inherited — the agent would be left with the main
+    # task's memory and no idea what to fix now (observed: repair "fixes"
+    # nothing, or re-applies a stale creation step).
+    messages.append({"role": "user", "content": user_content})
 tools = [
     {
         "type": "function",
