@@ -293,6 +293,17 @@ func commitChangesScript(workDir, commitMessage, authorName, authorEmail string)
 	return fmt.Sprintf("cd %s && rm -f .ai-factory/agent-prompt.md .ai-factory/task-instructions.md && find . -type d -name '__pycache__' -prune -exec rm -rf {} + && find . -type f \\( -name '*.pyc' -o -name '*.pyo' \\) -delete && git add -A && if git diff --cached --quiet; then echo 'No changes to commit'; else git -c user.name=%s -c user.email=%s commit -m %s; fi", shellQuote(workDir), shellQuote(authorName), shellQuote(authorEmail), shellQuote(commitMessage))
 }
 
+// commitChangesStrictScript is commitChangesScript plus a hard failure when the
+// repair agent produced no diff. Used by CI repair rounds: a "successful" round
+// that changed nothing would otherwise be treated as fixed, the branch head
+// stays put, no new events arrive, and the watch would idle until maxWait. A
+// non-zero exit turns the round into an explicit REPAIR PASS FAILED so the next
+// attempt runs immediately. The main task's own commit step keeps the lenient
+// variant (a no-change main task still succeeds via the existing PR).
+func commitChangesStrictScript(workDir, commitMessage, authorName, authorEmail string) string {
+	return fmt.Sprintf("cd %s && rm -f .ai-factory/agent-prompt.md .ai-factory/task-instructions.md && find . -type d -name '__pycache__' -prune -exec rm -rf {} + && find . -type f \\( -name '*.pyc' -o -name '*.pyo' \\) -delete && git add -A && if git diff --cached --quiet; then echo 'No changes to commit (repair produced no diff)' >&2; exit 1; else git -c user.name=%s -c user.email=%s commit -m %s; fi", shellQuote(workDir), shellQuote(authorName), shellQuote(authorEmail), shellQuote(commitMessage))
+}
+
 func pushChangeBranchScript(workDir, remoteName, branchName, targetBranch string) string {
 	// Use a plain --force push, not --force-with-lease. The change branch is
 	// always regenerated from the latest base ref (never edited incrementally
@@ -457,7 +468,7 @@ func BuildCIRepairScript(task *FactoryTask, repairInstructions string, opts CIRe
 	script := fmt.Sprintf("set -eu\n%s%s\n%s\n%s",
 		envSetup,
 		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand),
-		commitChangesScript(workDir, commitMessage, authorName, authorEmail),
+		commitChangesStrictScript(workDir, commitMessage, authorName, authorEmail),
 		pushChangeBranchScript(workDir, remoteName, changeBranch, task.Spec.Source.BaseRef),
 	)
 	return script, nil

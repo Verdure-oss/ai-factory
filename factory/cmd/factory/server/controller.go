@@ -352,7 +352,6 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		return err
 	}
 	resultMessage := "FactoryTask completed successfully"
-	changedFiles := collectChangedFiles(namespace, sandboxName, output.Plan.ContainerName)
 	resultURL, changeRequestAlreadyExists, err := createTaskChangeRequest(task)
 	if err != nil {
 		failure := taskpkg.ClassifyFailure(err.Error())
@@ -406,6 +405,10 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 			return fmt.Errorf("ci feedback failed: %s", summary)
 		}
 	}
+	// Collect changed files AFTER the CI watch so the success report includes the
+	// repair rounds' commits, not just the main task's changes. The checkout in
+	// the sandbox is the final branch head at this point.
+	changedFiles := collectChangedFiles(namespace, sandboxName, output.Plan.ContainerName)
 	if changeRequestAlreadyExists {
 		resultMessage = changeRequestReportMessage(task, resultURL, true, changedFiles)
 		if err := patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
@@ -643,7 +646,11 @@ func changeRequestKind(task *taskpkg.FactoryTask) string {
 }
 
 func collectChangedFiles(namespace, sandboxName, containerName string) []string {
-	script := "cd /workspace/repo && { git diff --name-only HEAD; git diff --name-only HEAD~1 HEAD 2>/dev/null || true; } | sort -u"
+	// Whole-branch diff vs the base ref's merge-base, so every commit on the
+	// change branch counts (main task + each CI repair round), not just the
+	// last one. Falls back to the working-tree/HEAD~1 diff when no base ref is
+	// resolvable in the checkout.
+	script := `cd /workspace/repo && BASE=$(git merge-base main HEAD 2>/dev/null || git merge-base origin/main HEAD 2>/dev/null || true) && { if [ -n "$BASE" ]; then git diff --name-only "$BASE"..HEAD; else git diff --name-only HEAD; git diff --name-only HEAD~1 HEAD 2>/dev/null || true; fi; } | sort -u`
 	output, err := kubectlOutput("exec", "-n", namespace, sandboxName, "-c", containerName, "--", "/bin/sh", "-lc", script)
 	if err != nil {
 		return nil
@@ -1018,7 +1025,6 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 	w := registerWaiter(key)
 	defer unregisterWaiter(key)
 	ctx := context.Background()
-	deadline := time.Now().Add(opts.maxWait)
 	var lastSummary string
 	var roundsRepaired int
 	announced := false
@@ -1046,6 +1052,9 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 
 	for attempt := 0; attempt < opts.maxRetries; attempt++ {
 		fmt.Fprintf(out, "--- CI watch attempt %d/%d waiting for events on %s\n", attempt+1, opts.maxRetries, key)
+		// Per-attempt deadline: each round gets a fresh maxWait window so a slow
+		// CI run in an early round cannot eat the budget of the final rounds.
+		deadline := time.Now().Add(opts.maxWait)
 		// bootstrap only on the first pass: the PR's CI may already have
 		// finished before the waiter registered. Repair passes are purely
 		// event-driven — a snapshot right after a force-push could re-read the
@@ -1089,6 +1098,31 @@ func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh
 				continue
 			}
 			roundsRepaired++
+			// The last repair push must get its result evaluated too: ending the
+			// loop directly after the final force-push would fail a task whose
+			// fix is already submitted. Wait one more cycle for that commit's CI
+			// before giving up.
+			if attempt == opts.maxRetries-1 {
+				fmt.Fprintf(out, "--- CI watch final round: waiting for the last fix's result\n")
+				finalDeadline := time.Now().Add(opts.maxWait)
+				finalStatus, finalSummary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, finalDeadline, false)
+				lastSummary = finalSummary
+				switch finalStatus {
+				case ciCheckGreen:
+					outcome = ciWatchGreen
+					fmt.Fprintf(out, "--- CI GREEN\n")
+					return outcome, finalSummary
+				case ciCheckRed:
+					outcome = ciWatchFailed
+					return outcome, fmt.Sprintf("CI still failing after %d repair attempts:\n%s", opts.maxRetries, lastSummary)
+				case ciCheckError:
+					outcome = ciWatchFailed
+					return outcome, fmt.Sprintf("check-runs API error: %s", finalSummary)
+				default:
+					outcome = ciWatchFailed
+					return outcome, fmt.Sprintf("CI still pending after %s", opts.maxWait)
+				}
+			}
 			// Fall through to the next attempt: wait for the re-pushed commit's
 			// check-suites to converge again before evaluating.
 		case ciCheckError:

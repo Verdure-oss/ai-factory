@@ -230,6 +230,41 @@ func TestWaitForCIEventReflectionLagRecovers(t *testing.T) {
 	}
 }
 
+// TestWatchAndRepairCIConfirmsLastRepairResult proves the final force-push's CI
+// result is evaluated before the watch gives up: with maxRetries=2, round 1
+// repairs but the fix still fails CI; round 2 (the last) fixes it; the watch
+// must wait one more cycle for that last commit and converge green instead of
+// failing a task whose fix is already submitted.
+func TestWatchAndRepairCIConfirmsLastRepairResult(t *testing.T) {
+	withTaskExists(t, true)
+	fake := &fakeCIClient{
+		headSHA: "abc123",
+		suites:  []CheckSuite{{ID: 1, Status: "completed", Conclusion: "failure", HeadSHA: "abc123"}},
+	}
+	repairRounds := 0
+	repair := func([]CheckRunAnnotation, []JobLogSnippet) error {
+		repairRounds++
+		if repairRounds == 2 {
+			fake.setSuites([]CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "abc123"}})
+		}
+		return nil
+	}
+	task := &taskpkg.FactoryTask{
+		Metadata: taskpkg.ObjectMeta{Name: "github-owner-repo-42", Namespace: "default"},
+	}
+	autoNotifyWaiter(task, "owner", "repo", "abc123", 30*time.Millisecond, 5*time.Second)
+	opts := ciWatchOptsForTest()
+	opts.maxRetries = 2
+	var out strings.Builder
+	outcome, summary := watchAndRepairCI(&out, task, "https://github.com/owner/repo/pull/42", fake, repair, opts)
+	if outcome != ciWatchGreen {
+		t.Fatalf("outcome = %v (summary %q), want ciWatchGreen: the last fix's result must be evaluated", outcome, summary)
+	}
+	if repairRounds != 2 {
+		t.Fatalf("repair rounds = %d, want 2", repairRounds)
+	}
+}
+
 // TestRepairExecArgsNeverCarriesScriptBody guards the repair-script transport:
 // the script is streamed over kubectl exec stdin, never passed as an argv
 // element. A repair script embeds the full CI evidence (annotations + job-log
