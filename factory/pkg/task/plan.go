@@ -436,6 +436,12 @@ func BuildCIRepairScript(task *FactoryTask, repairInstructions string, opts CIRe
 	envSetup := ""
 	if opts.SessionFile != "" {
 		envSetup += fmt.Sprintf("export AI_FACTORY_SESSION_FILE=%s\n", shellQuote(opts.SessionFile))
+		// Repair rounds load the main task's snapshot but must not write their
+		// own session back to it: every pass would append the previous pass,
+		// and the shared file overflows the model input window by the third
+		// repair (HTTP 400 "Range of input length should be [1, ...]" — the
+		// observed "third repair always fails, nothing to commit").
+		envSetup += "export AI_FACTORY_SESSION_READONLY=1\n"
 	}
 	if opts.MaxToolRounds > 0 {
 		envSetup += fmt.Sprintf("export OPENAI_MAX_TOOL_ROUNDS=%d\n", opts.MaxToolRounds)

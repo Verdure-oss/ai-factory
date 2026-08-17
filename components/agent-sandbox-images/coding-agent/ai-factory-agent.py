@@ -406,6 +406,12 @@ def parse_model_message(payload, phase):
 def persist_session():
     if not session_file:
         return
+    # Repair rounds run with AI_FACTORY_SESSION_READONLY=1: they load the main
+    # task's dumped snapshot but must not write their own session back, or the
+    # shared file accumulates round-over-round and overflows the API input
+    # window by the third repair. The main task (var unset) dumps once.
+    if os.environ.get("AI_FACTORY_SESSION_READONLY", "").strip() not in ("", "0", "false"):
+        return
     try:
         raw = json.dumps(messages, ensure_ascii=False, sort_keys=True)
         with open(session_file, "w", encoding="utf-8") as session_handle:

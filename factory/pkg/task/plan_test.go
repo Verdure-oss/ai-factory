@@ -48,6 +48,12 @@ func TestBuildCIRepairScriptEnvInjection(t *testing.T) {
 		if !strings.Contains(script, "export AI_FACTORY_SESSION_FILE=") {
 			t.Errorf("script missing AI_FACTORY_SESSION_FILE export:\n%s", script)
 		}
+		// A repair pass must never write its own session back over the main
+		// snapshot (round-over-round accumulation overflows the model input
+		// window by the third repair); the read-only marker must be set.
+		if !strings.Contains(script, "export AI_FACTORY_SESSION_READONLY=1") {
+			t.Errorf("script missing AI_FACTORY_SESSION_READONLY=1 export:\n%s", script)
+		}
 		if !strings.Contains(script, "export OPENAI_MAX_TOOL_ROUNDS=3") {
 			t.Errorf("script missing OPENAI_MAX_TOOL_ROUNDS=3 export:\n%s", script)
 		}
