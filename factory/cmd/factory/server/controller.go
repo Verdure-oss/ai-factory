@@ -1355,8 +1355,45 @@ func ciRepairRunnerFor(task *taskpkg.FactoryTask, namespace, sandboxName, prURL 
 		if err != nil {
 			return err
 		}
-		return runKubectl(nil, "exec", "-n", namespace, sandboxName, "-c", containerName, "--", "/bin/sh", "-lc", script)
+		return runRepairScriptInSandbox(namespace, sandboxName, containerName, script)
 	}
+}
+
+// repairExecArgs builds the kubectl exec argv for streaming a repair script
+// into the sandbox over stdin. The script never appears in argv: it embeds the
+// full CI evidence (annotations + job-log snippets) base64-encoded, which can
+// exceed the kernel per-argument ceiling (MAX_ARG_STRLEN, 128 KiB) — passing it
+// as a single `sh -lc "<script>"` argument makes kubectl's own execve fail with
+// E2BIG ("argument list too long") before anything runs, so the repair round
+// dies silently and no commit is pushed. The argv here is a short, fixed
+// snippet: materialize the incoming stdin to a file, then run it from disk.
+func repairExecArgs(namespace, sandboxName, containerName string) []string {
+	return []string{
+		"exec", "-i", "-n", namespace, sandboxName, "-c", containerName, "--",
+		"/bin/sh", "-lc", "cat > /tmp/ai-factory-repair.sh && sh /tmp/ai-factory-repair.sh",
+	}
+}
+
+// runRepairScriptInSandbox executes a CI repair script in the sandbox by
+// streaming it over kubectl exec stdin (exec -i ... -- sh), then running the
+// materialized /tmp/ai-factory-repair.sh from disk — identical semantics to a
+// direct `sh script` with no argument-size ceiling.
+func runRepairScriptInSandbox(namespace, sandboxName, containerName, script string) error {
+	args := repairExecArgs(namespace, sandboxName, containerName)
+	cmd := exec.Command("kubectl", args...)
+	cmd.Stdin = strings.NewReader(script)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	if err := cmd.Run(); err != nil {
+		return kubectlCommandError{
+			args:   args,
+			err:    err,
+			stdout: stdout.String(),
+			stderr: stderr.String(),
+		}
+	}
+	return nil
 }
 
 // reportCIWatchEnabled reports whether CI watching is enabled: the

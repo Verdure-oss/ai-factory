@@ -192,6 +192,32 @@ func autoNotifyWaiter(task *taskpkg.FactoryTask, owner, repo, headSHA string, in
 	}()
 }
 
+// TestRepairExecArgsNeverCarriesScriptBody guards the repair-script transport:
+// the script is streamed over kubectl exec stdin, never passed as an argv
+// element. A repair script embeds the full CI evidence (annotations + job-log
+// snippets) base64-encoded and can exceed the kernel per-argument cap
+// (MAX_ARG_STRLEN, 128 KiB); the old `sh -lc "<script>"` transport then died
+// with E2BIG ("argument list too long") before the agent ran, so no commit was
+// ever pushed and the watch spun on stale state. The argv must stay a short
+// forwarding snippet regardless of how big the script is.
+func TestRepairExecArgsNeverCarriesScriptBody(t *testing.T) {
+	script := strings.Repeat("evidence-line\n", 10000) // ≈ 140 KiB, over the 128 KiB cap
+	if len(script) <= 128*1024 {
+		t.Fatalf("test script too small (%d bytes); want > 128 KiB", len(script))
+	}
+	args := repairExecArgs("ns", "sandbox", "dev")
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "evidence-line") {
+		t.Fatalf("repair argv embeds script content; an oversized script would overflow the exec arg cap")
+	}
+	if len(joined) > 4096 {
+		t.Fatalf("repair argv unexpectedly large (%d bytes); the script must travel via stdin", len(joined))
+	}
+	if !strings.Contains(joined, "cat > /tmp/ai-factory-repair.sh") || !strings.Contains(joined, "sh /tmp/ai-factory-repair.sh") {
+		t.Errorf("repair argv does not stream stdin to a runnable file: %q", joined)
+	}
+}
+
 // TestWatchAndRepairCICommentsPRStartAndEnd proves watchAndRepairCI posts the
 // start comment once on the first failure and the aggregate result comment on
 // exit: first round fails and is repaired, second round converges green (the
