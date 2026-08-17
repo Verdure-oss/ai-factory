@@ -265,6 +265,48 @@ func TestWatchAndRepairCIConfirmsLastRepairResult(t *testing.T) {
 	}
 }
 
+// TestWaitForCIEventGhostQueuedSuiteDoesNotBlockGreen proves a "ghost" suite —
+// queued forever with no check run behind it — does not keep the convergence
+// wait pending. It must be dropped from the convergence view (it would never
+// complete) while a real queued suite WITH a run still blocks.
+func TestWaitForCIEventGhostQueuedSuiteDoesNotBlockGreen(t *testing.T) {
+	withTaskExists(t, true)
+	const key = "owner/repo/factory-task/github-owner-repo-42"
+	fake := &fakeCIClient{
+		headSHA: "abc123",
+		// Suite 1 is the ghost: queued, no run ever; suite 2 completed success
+		// and is backed by a real run.
+		suites: []CheckSuite{
+			{ID: 1, Status: "queued", Conclusion: "", HeadSHA: "abc123"},
+			{ID: 2, Status: "completed", Conclusion: "success", HeadSHA: "abc123"},
+		},
+		runs: []CheckRun{{ID: 22, Name: "lint", Status: "completed", Conclusion: "success", CheckSuite: CheckSuiteRef{ID: 2}}},
+	}
+	done := runWaitForCIEvent(t, fake, key, true)
+	select {
+	case r := <-done:
+		if r.status != ciCheckGreen {
+			t.Fatalf("status = %v (summary %q), want ciCheckGreen: a ghost queued suite must not block convergence", r.status, r.summary)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ghost queued suite kept the wait pending forever")
+	}
+
+	// A queued suite backed by a real run still blocks.
+	fake2 := &fakeCIClient{
+		headSHA: "abc123",
+		suites:  []CheckSuite{{ID: 1, Status: "queued", Conclusion: "", HeadSHA: "abc123"}},
+		runs: []CheckRun{{ID: 11, Name: "lint", Status: "queued", Conclusion: "", CheckSuite: CheckSuiteRef{ID: 1}}},
+	}
+	done2 := runWaitForCIEvent(t, fake2, key, true)
+	select {
+	case r := <-done2:
+		t.Fatalf("waitForCIEvent returned %v (summary %q) while a real queued run was pending", r.status, r.summary)
+	case <-time.After(250 * time.Millisecond):
+		// Correct: not converged while a real run is queued.
+	}
+}
+
 // TestRepairExecArgsNeverCarriesScriptBody guards the repair-script transport:
 // the script is streamed over kubectl exec stdin, never passed as an argv
 // element. A repair script embeds the full CI evidence (annotations + job-log

@@ -1225,11 +1225,27 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 		if err != nil {
 			return nil, "", err
 		}
+		// A suite that GitHub leaves "queued" with no workflow run behind it
+		// never completes and would block convergence forever (observed: all
+		// check runs pass, one queued suite idles, the watch waits until
+		// maxWait). Tell it apart from a real queued/in_progress run by which
+		// suites actually have check runs; queued-without-a-run suites are
+		// ghosts and are dropped from the convergence view.
+		haveRun := make(map[int64]bool)
+		if runs, runErr := gh.ListCheckRuns(ctx, owner, repo, head); runErr == nil {
+			for _, r := range runs {
+				haveRun[r.CheckSuite.ID] = true
+			}
+		}
 		filtered := make([]CheckSuite, 0, len(suites))
 		for _, s := range suites {
-			if s.HeadSHA == head {
-				filtered = append(filtered, s)
+			if s.HeadSHA != head {
+				continue
 			}
+			if s.Status == "queued" && !haveRun[s.ID] {
+				continue // ghost suite: never runs, never completes
+			}
+			filtered = append(filtered, s)
 		}
 		return filtered, summarizeCheckSuites(filtered), nil
 	}

@@ -26,6 +26,11 @@ import (
 	"strings"
 )
 
+// CheckSuiteRef is the suite a check run belongs to (nested in the run object).
+type CheckSuiteRef struct {
+	ID int64 `json:"id"`
+}
+
 // CheckRun is a single GitHub Actions check run on a commit.
 type CheckRun struct {
 	ID         int64  `json:"id"`
@@ -33,6 +38,10 @@ type CheckRun struct {
 	Status     string `json:"status"`      // queued | in_progress | completed
 	Conclusion string `json:"conclusion"`  // success | failure | neutral | cancelled | timed_out | skipped
 	DetailsURL string `json:"details_url"` // e.g. https://github.com/o/r/actions/runs/{run}/job/{job}
+	// CheckSuite is the suite this run belongs to. Used to tell a real
+	// run (which turns its suite in_progress/completed) apart from a "ghost"
+	// suite that GitHub leaves queued forever with no run behind it.
+	CheckSuite CheckSuiteRef `json:"check_suite"`
 }
 
 // CheckSuite is a single GitHub Actions check suite on a commit. A suite
