@@ -192,6 +192,44 @@ func autoNotifyWaiter(task *taskpkg.FactoryTask, owner, repo, headSHA string, in
 	}()
 }
 
+// TestWaitForCIEventReflectionLagRecovers pins the reflection-lag retry: a
+// re-pushed commit's completed events can all arrive while PullRequestHeadSHA
+// still reports the old head (GitHub PR-head reflection lags a force-push). The
+// events must not be silently dropped — the wait would starve forever with CI
+// already green (observed: checks pass, server never evaluates, no done label).
+// The pending head is re-checked once reflection catches up, then evaluates.
+func TestWaitForCIEventReflectionLagRecovers(t *testing.T) {
+	withTaskExists(t, true)
+	const key = "owner/repo/factory-task/github-owner-repo-42"
+	fake := &fakeCIClient{
+		headSHA: "stalehead", // PR-head reflection still lagging behind the push
+	}
+	done := runWaitForCIEvent(t, fake, key, false /* repair round */)
+
+	// Completed events for the fixed commit arrive while the reflected head is
+	// still the old one: not evaluated yet (correct), but a retry is armed.
+	notifyWaiter(key, "newfix")
+	select {
+	case r := <-done:
+		t.Fatalf("waitForCIEvent returned %v (summary %q) before reflection caught up", r.status, r.summary)
+	case <-time.After(80 * time.Millisecond):
+		// Still waiting — correct: head hasn't caught up yet.
+	}
+
+	// Reflection catches up to the fixed commit; its suites are green. The armed
+	// retry re-checks the head and converges green.
+	fake.setHeadSHA("newfix")
+	fake.setSuites([]CheckSuite{{ID: 1, Status: "completed", Conclusion: "success", HeadSHA: "newfix"}})
+	select {
+	case r := <-done:
+		if r.status != ciCheckGreen {
+			t.Fatalf("status = %v (summary %q), want ciCheckGreen", r.status, r.summary)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not converge green after reflection caught up (the retry starved)")
+	}
+}
+
 // TestRepairExecArgsNeverCarriesScriptBody guards the repair-script transport:
 // the script is streamed over kubectl exec stdin, never passed as an argv
 // element. A repair script embeds the full CI evidence (annotations + job-log

@@ -1140,6 +1140,43 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 	var known map[int64]bool
 	var confirm *time.Timer
 	var confirmC <-chan time.Time
+	// pendingHead/pendingC back the reflection-lag retry: when a webhook event
+	// names a head that PullRequestHeadSHA has not caught up to yet (right after
+	// a repair force-push), the event is not silently dropped — the head is
+	// remembered and a timer re-checks whether reflection has caught up. Without
+	// this, a burst of completed events arriving before the PR-head reflection
+	// updates is all "stale" and the wait starves forever even though CI is
+	// already green (observed: repair pushes a fix, PR checks all pass, server
+	// never evaluates and never posts the done label).
+	var pendingHead string
+	var pending *time.Timer
+	var pendingC <-chan time.Time
+	armPending := func(head string) {
+		pendingHead = head
+		if pending != nil {
+			if !pending.Stop() {
+				select {
+				case <-pending.C:
+				default:
+				}
+			}
+		}
+		pending = time.NewTimer(opts.settleInterval)
+		pendingC = pending.C
+	}
+	clearPending := func() {
+		if pending != nil {
+			if !pending.Stop() {
+				select {
+				case <-pending.C:
+				default:
+				}
+			}
+			pending = nil
+		}
+		pendingC = nil
+		pendingHead = ""
+	}
 
 	// listAt returns the suites belonging to head (the current PR head as seen
 	// by the caller when it resolved it). Only suites whose HeadSHA matches
@@ -1214,15 +1251,19 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 				continue
 			}
 			if n.headSHA != "" && head != n.headSHA {
-				// The event is a verdict for a commit that is not the current PR
-				// head: a late event for the superseded commit (arriving after a
-				// repair force-push) or a repo-wide wake for another branch.
-				// Evaluating it would hand the repair agent stale evidence that
-				// an already-superseded commit failed (the PR 8 regression).
-				// Skip; the current head's own completed events will arrive and
-				// match.
+				// The event names a commit that PullRequestHeadSHA does not
+				// report as the PR head yet. It is either a genuinely stale
+				// event for a superseded commit (evaluate never), or the head
+				// was just force-pushed and GitHub's PR-head reflection lags
+				// (evaluate once it catches up). Distinguish the two by
+				// remembering the head and retrying the reflection check later
+				// instead of silently dropping the event.
+				if n.headSHA != pendingHead {
+					armPending(n.headSHA)
+				}
 				continue
 			}
+			clearPending()
 			suites, summary, err := listAt(head)
 			if err != nil {
 				continue
@@ -1260,6 +1301,44 @@ func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient,
 				startConfirm(suites)
 			}
 			// Otherwise the window stays running untouched.
+		case <-pendingC:
+			// Reflection-lag retry for the pending event head: re-check whether
+			// PullRequestHeadSHA has caught up, then evaluate exactly like a
+			// matching event would. Without this the wait starves when all of a
+			// commit's completed events arrive before the reflection updates.
+			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if err != nil || head != pendingHead {
+				// Still lagging (or a transient error): try again later.
+				armPending(pendingHead)
+				continue
+			}
+			clearPending()
+			suites, summary, err := listAt(head)
+			if err != nil {
+				continue
+			}
+			if fastRedSuites(suites) {
+				if !bootstrap {
+					// Repair round: never fast-judge red; defer to the window so
+					// a genuine re-push event can supersede the verdict.
+					if confirmC == nil {
+						startConfirm(suites)
+					}
+					continue
+				}
+				stopConfirm()
+				return ciCheckRed, summary
+			}
+			if !allSuitesCompleted(suites) {
+				stopConfirm()
+				continue
+			}
+			if confirmC == nil {
+				startConfirm(suites)
+			} else if !sameSuiteIDs(known, suiteIDs(suites)) {
+				stopConfirm()
+				startConfirm(suites)
+			}
 		case <-confirmC:
 			// Window elapsed with no membership change: final convergence check.
 			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
