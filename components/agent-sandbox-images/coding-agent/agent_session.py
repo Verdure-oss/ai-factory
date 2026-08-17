@@ -92,24 +92,26 @@ def collect_git_snapshot(cwd=None):
 
 
 def render_session_snapshot(snapshot):
-    """Turn a snapshot dict into the messages a repair round starts with."""
-    messages = []
+    """Turn a snapshot dict into a single starting user message: the original
+    task instructions plus the main task's change summary. One message keeps
+    the transcript start compact for providers that dislike consecutive user
+    turns; the repair prompt itself is appended after it by the agent."""
+    body = []
     if snapshot.get("task_instructions"):
-        messages.append({"role": "user", "content": snapshot["task_instructions"]})
-
-    parts = ["## 主任务已完成的改动(当前 checkout 已包含这些变更)"]
+        body.append("# 主任务原指令\n" + snapshot["task_instructions"])
+    change_parts = ["## 主任务已完成的改动(当前 checkout 已包含这些变更)"]
     files = snapshot.get("changed_files") or []
     if files:
-        parts.append("### 变更文件")
-        parts.extend("- " + f for f in files)
+        change_parts.append("### 变更文件")
+        change_parts.extend("- " + f for f in files)
     if snapshot.get("changed_stat"):
-        parts.append("### 变更统计")
-        parts.append(snapshot["changed_stat"])
+        change_parts.append("### 变更统计")
+        change_parts.append(snapshot["changed_stat"])
     if snapshot.get("final_script"):
-        parts.append("### 主任务最终脚本片段")
-        parts.append(snapshot["final_script"])
-    messages.append({"role": "user", "content": "\n".join(parts)})
-    return messages
+        change_parts.append("### 主任务最终脚本片段")
+        change_parts.append(snapshot["final_script"])
+    body.append("\n".join(change_parts))
+    return [{"role": "user", "content": "\n\n".join(body)}]
 
 
 def session_file_is_readonly():

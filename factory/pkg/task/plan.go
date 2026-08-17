@@ -49,8 +49,10 @@ type ExecutionStep struct {
 	Command []string `yaml:"command"`
 }
 
-// CISessionFile is the sandbox-local path where the coding agent dumps its
-// full conversation (messages history) when AI_FACTORY_SESSION_FILE is set.
+// CISessionFile is the sandbox-local path where the coding agent persists its
+// session when AI_FACTORY_SESSION_FILE is set. The main task writes a compact
+// snapshot (task instructions, changed files, change stat, final script) that
+// CI repair rounds load as their starting context; repair rounds are read-only.
 // The main task agent writes it; the CI repair agent loads it (BuildCIRepairScript
 // exports the same path) so the repair round inherits the main task's codebase
 // knowledge without re-exploring. /tmp is used so the session never pollutes

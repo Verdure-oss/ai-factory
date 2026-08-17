@@ -75,17 +75,18 @@ class TestRenderSessionSnapshot(unittest.TestCase):
             "final_script": "sed -i 's/oops/0/' ci_repro.go",
         }
         rendered = render_session_snapshot(snapshot)
+        # A snapshot renders as exactly one user message so the agent can append
+        # its own prompt without producing consecutive-user noise.
+        self.assertEqual(len(rendered), 1)
         self.assertEqual(rendered[0]["role"], "user")
         self.assertIn("fix the widget", rendered[0]["content"])
-        body = "\n".join(m["content"] for m in rendered)
-        self.assertIn("ci_repro.go", body)
-        self.assertIn("1 file changed", body)
+        self.assertIn("ci_repro.go", rendered[0]["content"])
+        self.assertIn("1 file changed", rendered[0]["content"])
 
     def test_tolerates_missing_fields(self):
         rendered = render_session_snapshot({})
-        self.assertEqual(rendered, [
-            {"role": "user", "content": "## 主任务已完成的改动(当前 checkout 已包含这些变更)"},
-        ])
+        self.assertEqual(len(rendered), 1)
+        self.assertIn("主任务已完成的改动", rendered[0]["content"])
 
 
 class TestCollectGitSnapshot(unittest.TestCase):
