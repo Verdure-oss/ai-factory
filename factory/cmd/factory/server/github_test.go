@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -382,5 +383,21 @@ func TestSetTaskCancelled(t *testing.T) {
 	want := "ai-factory 已取消 #42：触发标签 ai-factory-run 被移除（任务尚未开始执行）"
 	if (*comments)[0] != want {
 		t.Fatalf("comment = %q, want %q", (*comments)[0], want)
+	}
+}
+
+func TestActionsJobLogsRoundTrip(t *testing.T) {
+	c := NewGitHubClient()
+	if !c.HasToken() {
+		t.Skip("no token; requires network to GitHub")
+	}
+	// PR #929 lint check-run 93732416644 belongs to a public repo; its job
+	// logs are readable with a public_repo token.
+	logs, err := c.ActionsJobLogs(context.Background(), "matrixhub-ai", "matrixhub", 93732416644)
+	if err != nil {
+		t.Fatalf("ActionsJobLogs: %v", err)
+	}
+	if !bytes.Contains(logs, []byte("generator_test.go")) {
+		t.Fatalf("expected job log to mention generator_test.go, got %d bytes", len(logs))
 	}
 }

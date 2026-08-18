@@ -25,6 +25,12 @@ from agent_budget import (
     PhaseRoundBudget,
     post_chat_completion,
 )
+from agent_session import (
+    build_session_snapshot,
+    collect_git_snapshot,
+    render_session_snapshot,
+    session_file_is_readonly,
+)
 from repair_loop import RepairCandidate, RepairLoopTerminated, run_repair_loop
 from agent_config import (
     AgentConfiguration,
@@ -288,6 +294,23 @@ vision_enabled = config.vision_enabled
 execution_deadline = ExecutionDeadline(total_timeout_seconds)
 with open(required_env("AI_FACTORY_PROMPT_FILE"), "r", encoding="utf-8") as prompt_handle:
     prompt = prompt_handle.read()
+
+session_file = os.environ.get("AI_FACTORY_SESSION_FILE", "").strip()
+session_messages = []
+if session_file:
+    try:
+        with open(session_file, "r", encoding="utf-8") as session_handle:
+            loaded = json.load(session_handle)
+        if isinstance(loaded, dict):
+            # New snapshot format (main task collapsed to the essentials a
+            # repair round needs); render it into starting messages.
+            session_messages = render_session_snapshot(loaded)
+        elif isinstance(loaded, list) and loaded and isinstance(loaded[0], dict):
+            session_messages = loaded
+    except (OSError, ValueError, TypeError):
+        # Missing/corrupt session file: proceed with a fresh conversation.
+        session_messages = []
+
 if not prompt.strip():
     print("FactoryTask prompt on stdin is empty", file=sys.stderr)
     sys.exit(2)
@@ -314,10 +337,21 @@ Do not change go.mod or go.sum only to work around the local Go toolchain versio
 Do not print secrets. Do not commit, push, or open pull requests.
 ai-factory will run validation, commit, push, and create the change request after you exit.
 """
-messages = [
-    {"role": "system", "content": system_prompt},
-    {"role": "user", "content": user_content},
-]
+messages = list(session_messages)
+if not messages:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+else:
+    if messages[0].get("role") != "system":
+        messages.insert(0, {"role": "system", "content": system_prompt})
+    # The current prompt is the task this process must do: for a repair round it
+    # carries the CI failure evidence. It must never be dropped just because a
+    # session snapshot was inherited — the agent would be left with the main
+    # task's memory and no idea what to fix now (observed: repair "fixes"
+    # nothing, or re-applies a stale creation step).
+    messages.append({"role": "user", "content": user_content})
 tools = [
     {
         "type": "function",
@@ -386,282 +420,311 @@ def parse_model_message(payload, phase):
     return choice, message, content, tool_calls
 
 
-script = ""
-payload = {}
-invalid_provider_responses = []
-tool_budget = PhaseRoundBudget(
-    "tool-exploration",
-    max_tool_rounds,
-    "ToolRoundsExhausted",
-)
-# Bounded single retry: if the first request fails and the prompt has images,
-# embed any images that download in the sandbox as base64 data URLs and retry
-# once, in case the provider cannot reach the original image URL.
-base64_fallback_tried = False
-while not script:
+def persist_session():
+    if not session_file:
+        return
+    # Repair rounds run with AI_FACTORY_SESSION_READONLY=1: they load the main
+    # task's dumped snapshot but must not write their own session back, or the
+    # shared file accumulates round-over-round and overflows the API input
+    # window by the third repair. The main task (var unset) dumps once.
+    if session_file_is_readonly():
+        return
     try:
-        tool_round = tool_budget.next_round()
-    except AgentBudgetError as exc:
-        print(
-            f"{exc}; switching to phase=final-script",
-            file=sys.stderr,
-        )
-        break
+        # The main task dumps a compact snapshot instead of the raw transcript:
+        # task instructions, the files it changed (git diff HEAD), and its final
+        # script. The full exploration history (~40 tool rounds of raw output)
+        # is deliberately dropped — it bloats every repair request and lets a
+        # repair agent replay a stale edit instead of fixing the next CI error.
+        snapshot = build_session_snapshot(messages)
+        files, change_stat = collect_git_snapshot()
+        snapshot["changed_files"] = files
+        snapshot["changed_stat"] = change_stat
+        raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        with open(session_file, "w", encoding="utf-8") as session_handle:
+            session_handle.write(redact(raw))
+    except (OSError, TypeError):
+        pass
 
-    request = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "tools": tools,
-        "tool_choice": "auto",
-    }
-    try:
-        payload = request_model(
-            request,
-            "tool-exploration",
-            exploration_request_timeout_seconds,
-            exit_on_error=False,
-        )
-    except AgentBudgetError:
-        if image_urls and not base64_fallback_tried:
-            base64_fallback_tried = True
-            embedded = {url: download_to_data_url(url) for url in image_urls}
-            if any(embedded.values()):
-                messages[1] = {
-                    "role": "user",
-                    "content": build_user_content(prompt, image_urls, embedded),
-                }
-                print(
-                    "OpenAI-compatible request failed with image URLs; "
-                    "retrying with base64-embedded images",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    "OpenAI-compatible request failed with image URLs; "
-                    "could not download images, retrying original request",
-                    file=sys.stderr,
-                )
-        payload = request_model(
-            request,
-            "tool-exploration",
-            exploration_request_timeout_seconds,
-        )
-    choice, message, content, tool_calls = parse_model_message(
-        payload,
+
+try:
+    script = ""
+    payload = {}
+    invalid_provider_responses = []
+    tool_budget = PhaseRoundBudget(
         "tool-exploration",
+        max_tool_rounds,
+        "ToolRoundsExhausted",
     )
-    dump_response_diagnostics(payload)
-    finish_reason = choice.get("finish_reason", "")
-
-    if tool_calls:
-        assistant_message = {
-            "role": "assistant",
-            "content": message.get("content"),
-            "tool_calls": tool_calls,
-        }
-        if "reasoning_content" in message:
-            assistant_message["reasoning_content"] = message.get("reasoning_content")
-        messages.append(assistant_message)
-        messages.extend(run_tool_calls(tool_calls, execution_deadline))
-        print(
-            "OpenAI-compatible tool exploration round completed: "
-            f"used_rounds={tool_round}; limit={max_tool_rounds}",
-            file=sys.stderr,
-        )
-        continue
-
-    if content.strip() and finish_reason != "length":
-        script = content
-        break
-
-    invalid_provider_responses.append(
-        (
-            "tool-exploration",
-            redact(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
-        )
-    )
-    if finish_reason == "length":
-        print(
-            "ModelOutputTruncated: phase=tool-exploration; switching to "
-            "phase=final-script",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "EmptyModelResponse: phase=tool-exploration; switching to "
-            "phase=final-script",
-            file=sys.stderr,
-        )
-    break
-
-if not script:
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                "Tool exploration is finished. Do not call more tools. "
-                "Changes already made by Shell tools persist. Return only a "
-                "concise final POSIX shell script now, without Markdown. The "
-                "script runs from the repository root but is stored under a "
-                "temporary path, so do not locate the repository from $0."
-            ),
-        }
-    )
-    final_budget = PhaseRoundBudget(
-        "final-script",
-        max_final_script_rounds,
-        "FinalScriptRoundsExhausted",
-    )
+    # Bounded single retry: if the first request fails and the prompt has images,
+    # embed any images that download in the sandbox as base64 data URLs and retry
+    # once, in case the provider cannot reach the original image URL.
+    base64_fallback_tried = False
     while not script:
         try:
-            final_attempt = final_budget.next_round()
+            tool_round = tool_budget.next_round()
         except AgentBudgetError as exc:
-            print(str(exc), file=sys.stderr)
-            for response_index, phase_response in enumerate(
-                invalid_provider_responses,
-                start=1,
-            ):
-                response_phase, provider_response = phase_response
-                print(
-                    "--- provider response "
-                    f"{response_index} phase={response_phase} start ---",
-                    file=sys.stderr,
-                )
-                print(provider_response, file=sys.stderr)
-                print(
-                    "--- provider response "
-                    f"{response_index} phase={response_phase} end ---",
-                    file=sys.stderr,
-                )
-            sys.exit(1)
+            print(
+                f"{exc}; switching to phase=final-script",
+                file=sys.stderr,
+            )
+            break
 
-        payload = request_model(
-            {
-                "model": model,
-                "messages": messages,
-                "tool_choice": "none",
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            "final-script",
-            final_request_timeout_seconds,
-        )
-        choice, _message, content, tool_calls = parse_model_message(
+        request = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        try:
+            payload = request_model(
+                request,
+                "tool-exploration",
+                exploration_request_timeout_seconds,
+                exit_on_error=False,
+            )
+        except AgentBudgetError:
+            if image_urls and not base64_fallback_tried:
+                base64_fallback_tried = True
+                embedded = {url: download_to_data_url(url) for url in image_urls}
+                if any(embedded.values()):
+                    messages[1] = {
+                        "role": "user",
+                        "content": build_user_content(prompt, image_urls, embedded),
+                    }
+                    print(
+                        "OpenAI-compatible request failed with image URLs; "
+                        "retrying with base64-embedded images",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "OpenAI-compatible request failed with image URLs; "
+                        "could not download images, retrying original request",
+                        file=sys.stderr,
+                    )
+            payload = request_model(
+                request,
+                "tool-exploration",
+                exploration_request_timeout_seconds,
+            )
+        choice, message, content, tool_calls = parse_model_message(
             payload,
-            "final-script",
+            "tool-exploration",
         )
         dump_response_diagnostics(payload)
         finish_reason = choice.get("finish_reason", "")
 
-        if not tool_calls and content.strip() and finish_reason != "length":
+        if tool_calls:
+            assistant_message = {
+                "role": "assistant",
+                "content": message.get("content"),
+                "tool_calls": tool_calls,
+            }
+            if "reasoning_content" in message:
+                assistant_message["reasoning_content"] = message.get("reasoning_content")
+            messages.append(assistant_message)
+            messages.extend(run_tool_calls(tool_calls, execution_deadline))
+            print(
+                "OpenAI-compatible tool exploration round completed: "
+                f"used_rounds={tool_round}; limit={max_tool_rounds}",
+                file=sys.stderr,
+            )
+            continue
+
+        if content.strip() and finish_reason != "length":
             script = content
             break
 
         invalid_provider_responses.append(
             (
-                "final-script",
+                "tool-exploration",
                 redact(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             )
         )
-        if tool_calls:
-            attempted_tools = truncate(
-                json.dumps(tool_calls, ensure_ascii=False),
-                2000,
-            )
-            retry_detail = (
-                "Your last response still tried to call tools, but no more "
-                "tools are available. Do not call Shell. "
-                f"Attempted tool calls: {attempted_tools}"
-            )
-        elif finish_reason == "length":
-            retry_detail = (
-                "Your last response was truncated by the token limit. Return "
-                "a shorter script."
+        if finish_reason == "length":
+            print(
+                "ModelOutputTruncated: phase=tool-exploration; switching to "
+                "phase=final-script",
+                file=sys.stderr,
             )
         else:
-            retry_detail = (
-                "Your last response did not contain a script. Do not return "
-                "only analysis or reasoning."
+            print(
+                "EmptyModelResponse: phase=tool-exploration; switching to "
+                "phase=final-script",
+                file=sys.stderr,
             )
-        print(
-            "InvalidFinalScriptResponse: phase=final-script; "
-            f"used_rounds={final_attempt}; limit={max_final_script_rounds}; "
-            f"finish_reason={finish_reason!r}; tool_calls={len(tool_calls)}; "
-            f"content_length={len(content)}",
-            file=sys.stderr,
-        )
+        break
+
+    if not script:
         messages.append(
             {
                 "role": "user",
                 "content": (
-                    f"{retry_detail} Do not include analysis or comments. "
-                    "Return only a concise POSIX shell script."
+                    "Tool exploration is finished. Do not call more tools. "
+                    "Changes already made by Shell tools persist. Return only a "
+                    "concise final POSIX shell script now, without Markdown. The "
+                    "script runs from the repository root but is stored under a "
+                    "temporary path, so do not locate the repository from $0."
                 ),
             }
         )
-
-completed = run_generated_script(
-    script,
-    model,
-    "generated",
-    execution_deadline,
-)
-
-
-def request_repair(round_number, round_limit, repair_prompt):
-    print(
-        "OpenAI-compatible generated script failed; requesting repair script "
-        f"({round_number}/{round_limit})",
-        file=sys.stderr,
-    )
-    repair_payload = request_model(
-        {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                # Use the multimodal user content so a repair round still sees
-                # issue images; falls back to the plain prompt when vision is
-                # disabled or there are no images.
-                {"role": "user", "content": user_content},
-                {"role": "user", "content": repair_prompt},
-            ],
-            "tool_choice": "none",
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
-        "repair-script",
-        repair_request_timeout_seconds,
-        exit_on_error=False,
-    )
-    dump_response_diagnostics(repair_payload)
-    try:
-        repair_script = extract_repair_script(repair_payload)
-    except RepairResponseError as exc:
-        return RepairCandidate(
-            error=str(exc),
-            diagnostics=json.dumps(repair_payload, ensure_ascii=False, sort_keys=True),
+        final_budget = PhaseRoundBudget(
+            "final-script",
+            max_final_script_rounds,
+            "FinalScriptRoundsExhausted",
         )
-    return RepairCandidate(script=repair_script)
+        while not script:
+            try:
+                final_attempt = final_budget.next_round()
+            except AgentBudgetError as exc:
+                print(str(exc), file=sys.stderr)
+                for response_index, phase_response in enumerate(
+                    invalid_provider_responses,
+                    start=1,
+                ):
+                    response_phase, provider_response = phase_response
+                    print(
+                        "--- provider response "
+                        f"{response_index} phase={response_phase} start ---",
+                        file=sys.stderr,
+                    )
+                    print(provider_response, file=sys.stderr)
+                    print(
+                        "--- provider response "
+                        f"{response_index} phase={response_phase} end ---",
+                        file=sys.stderr,
+                    )
+                sys.exit(1)
 
+            payload = request_model(
+                {
+                    "model": model,
+                    "messages": messages,
+                    "tool_choice": "none",
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                "final-script",
+                final_request_timeout_seconds,
+            )
+            choice, _message, content, tool_calls = parse_model_message(
+                payload,
+                "final-script",
+            )
+            dump_response_diagnostics(payload)
+            finish_reason = choice.get("finish_reason", "")
 
-try:
-    completed = run_repair_loop(
+            if not tool_calls and content.strip() and finish_reason != "length":
+                script = content
+                break
+
+            invalid_provider_responses.append(
+                (
+                    "final-script",
+                    redact(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
+                )
+            )
+            if tool_calls:
+                attempted_tools = truncate(
+                    json.dumps(tool_calls, ensure_ascii=False),
+                    2000,
+                )
+                retry_detail = (
+                    "Your last response still tried to call tools, but no more "
+                    "tools are available. Do not call Shell. "
+                    f"Attempted tool calls: {attempted_tools}"
+                )
+            elif finish_reason == "length":
+                retry_detail = (
+                    "Your last response was truncated by the token limit. Return "
+                    "a shorter script."
+                )
+            else:
+                retry_detail = (
+                    "Your last response did not contain a script. Do not return "
+                    "only analysis or reasoning."
+                )
+            print(
+                "InvalidFinalScriptResponse: phase=final-script; "
+                f"used_rounds={final_attempt}; limit={max_final_script_rounds}; "
+                f"finish_reason={finish_reason!r}; tool_calls={len(tool_calls)}; "
+                f"content_length={len(content)}",
+                file=sys.stderr,
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"{retry_detail} Do not include analysis or comments. "
+                        "Return only a concise POSIX shell script."
+                    ),
+                }
+            )
+
+    completed = run_generated_script(
         script,
-        completed,
-        max_repair_rounds,
-        request_repair,
-        lambda repair_script, label: run_generated_script(
-            repair_script,
-            model,
-            label,
-            execution_deadline,
-        ),
-        redact=redact,
+        model,
+        "generated",
+        execution_deadline,
     )
-except RepairLoopTerminated as exc:
-    print(exc.diagnostics, file=sys.stderr)
-    sys.exit(exc.returncode)
 
-sys.exit(completed.returncode)
+
+    def request_repair(round_number, round_limit, repair_prompt):
+        print(
+            "OpenAI-compatible generated script failed; requesting repair script "
+            f"({round_number}/{round_limit})",
+            file=sys.stderr,
+        )
+        repair_payload = request_model(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    # Use the multimodal user content so a repair round still sees
+                    # issue images; falls back to the plain prompt when vision is
+                    # disabled or there are no images.
+                    {"role": "user", "content": user_content},
+                    {"role": "user", "content": repair_prompt},
+                ],
+                "tool_choice": "none",
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            "repair-script",
+            repair_request_timeout_seconds,
+            exit_on_error=False,
+        )
+        dump_response_diagnostics(repair_payload)
+        try:
+            repair_script = extract_repair_script(repair_payload)
+        except RepairResponseError as exc:
+            return RepairCandidate(
+                error=str(exc),
+                diagnostics=json.dumps(repair_payload, ensure_ascii=False, sort_keys=True),
+            )
+        return RepairCandidate(script=repair_script)
+
+
+    try:
+        completed = run_repair_loop(
+            script,
+            completed,
+            max_repair_rounds,
+            request_repair,
+            lambda repair_script, label: run_generated_script(
+                repair_script,
+                model,
+                label,
+                execution_deadline,
+            ),
+            redact=redact,
+        )
+    except RepairLoopTerminated as exc:
+        print(exc.diagnostics, file=sys.stderr)
+        sys.exit(exc.returncode)
+
+    sys.exit(completed.returncode)
+finally:
+    persist_session()

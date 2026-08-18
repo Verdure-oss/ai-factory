@@ -16,6 +16,7 @@ package task
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -47,6 +48,17 @@ type ExecutionStep struct {
 	Name    string   `yaml:"name"`
 	Command []string `yaml:"command"`
 }
+
+// CISessionFile is the sandbox-local path where the coding agent persists its
+// session when AI_FACTORY_SESSION_FILE is set. The main task writes a compact
+// snapshot (task instructions, changed files, change stat, final script) that
+// CI repair rounds load as their starting context; repair rounds are read-only.
+// The main task agent writes it; the CI repair agent loads it (BuildCIRepairScript
+// exports the same path) so the repair round inherits the main task's codebase
+// knowledge without re-exploring. /tmp is used so the session never pollutes
+// the repository checkout; both runs share the same sandbox container, so the
+// file survives between the two kubectl exec calls.
+const CISessionFile = "/tmp/ai-factory-session.json"
 
 // BuildExecutionPlan normalizes provider-specific source details into the
 // provider-neutral steps a controller needs to create a sandbox and run work.
@@ -153,9 +165,16 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 	}
 
 	if strings.TrimSpace(task.Spec.Work.Instructions) != "" {
+		// Dedicated agent step. The session file env var lets the agent load a
+		// prior session (CI repair round) and, more importantly, dump its own
+		// conversation at the end so a later repair round inherits context. It
+		// is set unconditionally — the agent is already backward compatible and
+		// simply skips dump/load when the var is unset.
+		agentScript := fmt.Sprintf("export AI_FACTORY_SESSION_FILE=%s\n%s", shellQuote(CISessionFile),
+			runAgentScript(workDir, task.Spec.Work.Instructions, task.Spec.Agent.PromptRef, agentCommand))
 		plan.Steps = append(plan.Steps, ExecutionStep{
 			Name:    "run coding agent",
-			Command: []string{"/bin/sh", "-lc", runAgentScript(workDir, task.Spec.Work.Instructions, task.Spec.Agent.PromptRef, agentCommand)},
+			Command: []string{"/bin/sh", "-lc", agentScript},
 		})
 	}
 
@@ -272,6 +291,17 @@ func changeRequestDefaults(task *FactoryTask) (string, string, string, string, s
 
 func commitChangesScript(workDir, commitMessage, authorName, authorEmail string) string {
 	return fmt.Sprintf("cd %s && rm -f .ai-factory/agent-prompt.md .ai-factory/task-instructions.md && find . -type d -name '__pycache__' -prune -exec rm -rf {} + && find . -type f \\( -name '*.pyc' -o -name '*.pyo' \\) -delete && git add -A && if git diff --cached --quiet; then echo 'No changes to commit'; else git -c user.name=%s -c user.email=%s commit -m %s; fi", shellQuote(workDir), shellQuote(authorName), shellQuote(authorEmail), shellQuote(commitMessage))
+}
+
+// commitChangesStrictScript is commitChangesScript plus a hard failure when the
+// repair agent produced no diff. Used by CI repair rounds: a "successful" round
+// that changed nothing would otherwise be treated as fixed, the branch head
+// stays put, no new events arrive, and the watch would idle until maxWait. A
+// non-zero exit turns the round into an explicit REPAIR PASS FAILED so the next
+// attempt runs immediately. The main task's own commit step keeps the lenient
+// variant (a no-change main task still succeeds via the existing PR).
+func commitChangesStrictScript(workDir, commitMessage, authorName, authorEmail string) string {
+	return fmt.Sprintf("cd %s && rm -f .ai-factory/agent-prompt.md .ai-factory/task-instructions.md && find . -type d -name '__pycache__' -prune -exec rm -rf {} + && find . -type f \\( -name '*.pyc' -o -name '*.pyo' \\) -delete && git add -A && if git diff --cached --quiet; then echo 'No changes to commit (repair produced no diff)' >&2; exit 1; else git -c user.name=%s -c user.email=%s commit -m %s; fi", shellQuote(workDir), shellQuote(authorName), shellQuote(authorEmail), shellQuote(commitMessage))
 }
 
 func pushChangeBranchScript(workDir, remoteName, branchName, targetBranch string) string {
@@ -394,4 +424,52 @@ func cloneHost(cloneURL string) (string, error) {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// CIRepairOptions controls the CI-failure repair script's environment overrides.
+type CIRepairOptions struct {
+	SessionFile   string // /tmp/ai-factory-session.json; "" = no session
+	MaxToolRounds int    // override OPENAI_MAX_TOOL_ROUNDS in the repair agent; <=0 = inherit
+}
+
+// BuildCIRepairScript builds a single shell script that runs the coding agent
+// with CI-failure repair instructions against the existing checkout, then
+// commits and force-pushes the fix to the change branch (updating the PR).
+// The agent never commits or pushes; this script runs them after the agent.
+func BuildCIRepairScript(task *FactoryTask, repairInstructions string, opts CIRepairOptions) (string, error) {
+	if task == nil {
+		return "", errors.New("FactoryTask is required")
+	}
+	workDir := "/workspace/repo"
+	agentCommand := task.Spec.Agent.Command
+	if agentCommand == "" {
+		agentCommand = "ai-factory-agent openai-compatible"
+	}
+	changeBranch, _, remoteName, commitMessage, authorName, authorEmail, _, _ := changeRequestDefaults(task)
+	envSetup := ""
+	if opts.SessionFile != "" {
+		envSetup += fmt.Sprintf("export AI_FACTORY_SESSION_FILE=%s\n", shellQuote(opts.SessionFile))
+		// Repair rounds load the main task's snapshot but must not write their
+		// own session back to it: every pass would append the previous pass,
+		// and the shared file overflows the model input window by the third
+		// repair (HTTP 400 "Range of input length should be [1, ...]" — the
+		// observed "third repair always fails, nothing to commit").
+		envSetup += "export AI_FACTORY_SESSION_READONLY=1\n"
+	}
+	if opts.MaxToolRounds > 0 {
+		envSetup += fmt.Sprintf("export OPENAI_MAX_TOOL_ROUNDS=%d\n", opts.MaxToolRounds)
+	}
+	// The repair sandbox is offline: a `go` command against a module that
+	// requires a newer toolchain would try to download it from proxy.golang.org
+	// and hang on a network timeout. Pin the local toolchain so any such
+	// attempt fails fast instead of burning the repair budget; the repair
+	// prompt already forbids go-based validation for the same reason.
+	envSetup += "export GOTOOLCHAIN=local\n"
+	script := fmt.Sprintf("set -eu\n%s%s\n%s\n%s",
+		envSetup,
+		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand),
+		commitChangesStrictScript(workDir, commitMessage, authorName, authorEmail),
+		pushChangeBranchScript(workDir, remoteName, changeBranch, task.Spec.Source.BaseRef),
+	)
+	return script, nil
 }

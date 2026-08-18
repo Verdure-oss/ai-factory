@@ -44,6 +44,9 @@ const (
 	// RepairRoundsExhausted means no repair succeeded within the configured
 	// maximum number of repair rounds.
 	RepairRoundsExhausted FailureReason = "RepairRoundsExhausted"
+	// CIFeedbackFailed means GitHub CI did not pass after the repair budget
+	// was exhausted (or no CI events were observed before the wait deadline).
+	CIFeedbackFailed FailureReason = "CIFeedbackFailed"
 	// InvalidGeneratedScript means the model returned prose, Markdown, or
 	// malformed shell content instead of an executable script.
 	InvalidGeneratedScript FailureReason = "InvalidGeneratedScript"
@@ -197,6 +200,7 @@ func FailureReasonList() []FailureReason {
 		RepeatedInvalidRepairScript,
 		RepeatedInvalidRepairResponseFormat,
 		RepairRoundsExhausted,
+		CIFeedbackFailed,
 		InvalidGeneratedScript,
 		ModelTimeout,
 		TotalExecutionDeadlineExceeded,

@@ -352,7 +352,6 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		return err
 	}
 	resultMessage := "FactoryTask completed successfully"
-	changedFiles := collectChangedFiles(namespace, sandboxName, output.Plan.ContainerName)
 	resultURL, changeRequestAlreadyExists, err := createTaskChangeRequest(task)
 	if err != nil {
 		failure := taskpkg.ClassifyFailure(err.Error())
@@ -380,6 +379,36 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		reportTaskResult(out, task, taskpkg.PhaseFailed, err.Error())
 		return err
 	}
+	// CI feedback loop: after the PR is created, wait for GitHub check events
+	// (webhook-driven, no polling) and repair CI failures in the reused sandbox
+	// until the quiet-window evaluation declares CI green or the budget runs out.
+	// GitHub-only: GitLab MR URLs have no /pull/N shape for watchAndRepairCI.
+	if resultURL != "" && reportCIWatchEnabled() && task.Spec.Source.Provider == taskpkg.ProviderGitHub {
+		fmt.Fprintf(out, "--- CI gathering check results for %s\n", resultURL)
+		watchOpts := resolveCIWatchOptions()
+		outcome, summary := watchAndRepairCI(out, task, resultURL, NewGitHubClient(), ciRepairRunnerFor(task, namespace, sandboxName, resultURL, watchOpts), watchOpts)
+		if outcome != ciWatchGreen {
+			failure := taskpkg.FailureClassification{
+				Reason:     taskpkg.CIFeedbackFailed,
+				Friendly:   "GitHub CI did not pass after repair attempts",
+				RawMessage: summary,
+			}
+			_ = patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
+				Phase:            taskpkg.PhaseFailed,
+				Reason:           "CIFeedbackFailed",
+				Message:          "GitHub CI failed after repair attempts: " + summary,
+				SandboxClaimName: claim,
+				SandboxName:      sandboxName,
+				FailureReason:    failure,
+			})
+			reportTaskResult(out, task, taskpkg.PhaseFailed, "GitHub CI failed after repair attempts: "+summary)
+			return fmt.Errorf("ci feedback failed: %s", summary)
+		}
+	}
+	// Collect changed files AFTER the CI watch so the success report includes the
+	// repair rounds' commits, not just the main task's changes. The checkout in
+	// the sandbox is the final branch head at this point.
+	changedFiles := collectChangedFiles(namespace, sandboxName, output.Plan.ContainerName)
 	if changeRequestAlreadyExists {
 		resultMessage = changeRequestReportMessage(task, resultURL, true, changedFiles)
 		if err := patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
@@ -617,7 +646,11 @@ func changeRequestKind(task *taskpkg.FactoryTask) string {
 }
 
 func collectChangedFiles(namespace, sandboxName, containerName string) []string {
-	script := "cd /workspace/repo && { git diff --name-only HEAD; git diff --name-only HEAD~1 HEAD 2>/dev/null || true; } | sort -u"
+	// Whole-branch diff vs the base ref's merge-base, so every commit on the
+	// change branch counts (main task + each CI repair round), not just the
+	// last one. Falls back to the working-tree/HEAD~1 diff when no base ref is
+	// resolvable in the checkout.
+	script := `cd /workspace/repo && BASE=$(git merge-base main HEAD 2>/dev/null || git merge-base origin/main HEAD 2>/dev/null || true) && { if [ -n "$BASE" ]; then git diff --name-only "$BASE"..HEAD; else git diff --name-only HEAD; git diff --name-only HEAD~1 HEAD 2>/dev/null || true; fi; } | sort -u`
 	output, err := kubectlOutput("exec", "-n", namespace, sandboxName, "-c", containerName, "--", "/bin/sh", "-lc", script)
 	if err != nil {
 		return nil
@@ -853,4 +886,651 @@ func waitForSandboxClaimReady(namespace, name string, timeout time.Duration) err
 		time.Sleep(pollInterval)
 	}
 	return fmt.Errorf("timeout waiting for SandboxClaim %s/%s to be Ready after %v", namespace, name, timeout)
+}
+
+// ciWatchOutcome is the terminal result of a CI watch/repair cycle.
+type ciWatchOutcome int
+
+const (
+	// ciWatchGreen means CI became green (possibly after repairs).
+	ciWatchGreen ciWatchOutcome = iota
+	// ciWatchFailed means CI could not be made green within the budget.
+	ciWatchFailed
+)
+
+// ciWatchOptions controls the event-driven CI watch loop and the repair
+// script. There is intentionally no poll interval: the loop is woken by
+// webhook events (via the ciWaiter registry) and only evaluates against the
+// check-suites API after an event arrives. settleInterval is the short
+// confirm window T (default 60s) that converges late-registering suites once
+// every suite has completed; it never waits for CI to run.
+type ciWatchOptions struct {
+	maxRetries       int           // repair attempts before giving up the whole watch
+	maxWait          time.Duration // total wall-clock budget; only a fallback when the event stream is lost
+	settleInterval   time.Duration // confirm window T: quiet hold after all suites complete
+	maxToolRounds    int           // OPENAI_MAX_TOOL_ROUNDS for the repair agent
+	allowTestChanges bool          // default policy: test edits allowed when CI fails in tests
+	logSnippetLines  int           // job-log snippet window centered on the error
+}
+
+// ciWatchDefaults* are defaults for tuning keys without a CLI flag: the repair
+// agent's exploration budget and the job-log snippet window. The retry/wait/
+// settle values come from opts.CIWatch* (flags, hot-reloadable via CI_WATCH_*).
+const (
+	ciWatchDefaultsMaxToolRounds   = 3
+	ciWatchDefaultsLogSnippetLines = 20
+)
+
+// ciRepairRunner executes a single repair pass against the reused sandbox
+// using the given failure evidence. It returns an error only when the repair
+// script could not be built or the sandbox failed to run it; whether another
+// pass is needed is decided by the next CI evaluation.
+type ciRepairRunner func(annotations []CheckRunAnnotation, logSnippets []JobLogSnippet) error
+
+// ciNotify is a webhook wake delivered to a CI watch loop. headSHA is the head
+// commit the event's verdict belongs to, taken straight from the webhook
+// payload (GitHub-pushed, so immune to the PR-head reflection lag that makes
+// PullRequestHeadSHA return a superseded sha right after a repair force-push).
+// It is empty when the event carried no head_sha (defensive fallback), in which
+// case the waiter falls back to evaluating its own PR head.
+type ciNotify struct {
+	headSHA string
+}
+
+// ciWaiter lets a webhook handler signal a blocked watch loop.
+type ciWaiter struct {
+	notify chan ciNotify
+}
+
+var (
+	ciRegistryMu sync.Mutex
+	ciRegistry   = map[string]*ciWaiter{}
+)
+
+// registerWaiter registers the watch loop for key (owner/repo/branch) and
+// returns the waiter the loop blocks on. The webhook handler wakes it via
+// notifyWaiter with the same key.
+func registerWaiter(key string) *ciWaiter {
+	ciRegistryMu.Lock()
+	defer ciRegistryMu.Unlock()
+	w := &ciWaiter{notify: make(chan ciNotify, 1)}
+	ciRegistry[key] = w
+	return w
+}
+
+// unregisterWaiter removes the waiter for key so a late webhook event for a
+// finished watch is a no-op.
+func unregisterWaiter(key string) {
+	ciRegistryMu.Lock()
+	defer ciRegistryMu.Unlock()
+	delete(ciRegistry, key)
+}
+
+// notifyWaiter wakes the waiter for key without blocking. headSHA is the commit
+// the event's verdict belongs to ("" when unknown). It is a no-op when no watch
+// loop is registered for the key (already finished, or no loop yet).
+func notifyWaiter(key string, headSHA string) {
+	ciRegistryMu.Lock()
+	w := ciRegistry[key]
+	ciRegistryMu.Unlock()
+	if w == nil {
+		return
+	}
+	select {
+	case w.notify <- ciNotify{headSHA: headSHA}:
+	default:
+	}
+}
+
+// notifyWaitersForRepo wakes every waiter registered under a repo prefix (e.g.
+// "owner/repo/") with the event's headSHA. Used when a check_run event carries
+// no head_branch: the branch key is unavailable, so we wake all watchers for
+// the repo. The head_sha gate in waitForCIEvent keeps each waiter evaluating
+// only events belonging to its own PR head — a spurious wake for another
+// branch/commit is ignored, never misjudged.
+func notifyWaitersForRepo(repoPrefix string, headSHA string) {
+	ciRegistryMu.Lock()
+	wake := make([]*ciWaiter, 0, 4)
+	for key, w := range ciRegistry {
+		if strings.HasPrefix(key, repoPrefix) {
+			wake = append(wake, w)
+		}
+	}
+	ciRegistryMu.Unlock()
+	for _, w := range wake {
+		select {
+		case w.notify <- ciNotify{headSHA: headSHA}:
+		default:
+		}
+	}
+}
+
+// watchAndRepairCI waits for GitHub check events on the PR, evaluates the
+// check suites after a confirm window, and repairs any failures by running the
+// given repair runner in the reused sandbox. It keeps repairing — a repair
+// pass that errors does not end the watch; the next attempt tries again —
+// until CI is green or the budget (maxRetries / maxWait) is exhausted. It
+// returns ciWatchGreen once CI is green, and ciWatchFailed otherwise. The PR
+// gets two progress comments: one when the first failure is found (repair
+// rounds pending announces) and one aggregated result on exit. Comments never
+// break the watch — failures are logged only.
+func watchAndRepairCI(out io.Writer, task *taskpkg.FactoryTask, prURL string, gh ciClient, repair ciRepairRunner, opts ciWatchOptions) (ciWatchOutcome, string) {
+	owner, repo, number, err := parsePullRequestURL(prURL)
+	if err != nil {
+		return ciWatchFailed, fmt.Sprintf("parse PR URL %q: %v", prURL, err)
+	}
+	// branch name is deterministic and force-push-stable; matches webhook head_branch.
+	changeBranch, _ := changeRequestBranches(task)
+	key := fmt.Sprintf("%s/%s/%s", owner, repo, changeBranch)
+	w := registerWaiter(key)
+	defer unregisterWaiter(key)
+	ctx := context.Background()
+	var lastSummary string
+	var roundsRepaired int
+	announced := false
+
+	comment := func(body string) {
+		if err := gh.CommentOnIssue(ctx, owner, repo, number, body); err != nil {
+			fmt.Fprintf(out, "--- PR progress comment skipped: %v\n", err)
+		}
+	}
+	// Aggregated result comment fires exactly once on every exit path. outcome
+	// is assigned before each return below, so the deferred closure sees it.
+	outcome := ciWatchFailed
+	defer func() {
+		switch {
+		case outcome == ciWatchGreen && roundsRepaired > 0:
+			comment(fmt.Sprintf("🤖 CI green after %d repair round(s).", roundsRepaired))
+		case outcome == ciWatchGreen:
+			comment("🤖 CI green, no repairs needed.")
+		case roundsRepaired > 0:
+			comment(fmt.Sprintf("🤖 CI still failing after %d repair round(s):\n%s", roundsRepaired, lastSummary))
+		default:
+			comment(fmt.Sprintf("🤖 CI could not be made green: %s", lastSummary))
+		}
+	}()
+
+	for attempt := 0; attempt < opts.maxRetries; attempt++ {
+		fmt.Fprintf(out, "--- CI watch attempt %d/%d waiting for events on %s\n", attempt+1, opts.maxRetries, key)
+		// Per-attempt deadline: each round gets a fresh maxWait window so a slow
+		// CI run in an early round cannot eat the budget of the final rounds.
+		deadline := time.Now().Add(opts.maxWait)
+		// bootstrap only on the first pass: the PR's CI may already have
+		// finished before the waiter registered. Repair passes are purely
+		// event-driven — a snapshot right after a force-push could re-read the
+		// superseded commit's failing suites and trigger a regressive repair.
+		status, summary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, deadline, attempt == 0)
+		lastSummary = summary
+		switch status {
+		case ciCheckGreen:
+			outcome = ciWatchGreen
+			fmt.Fprintf(out, "--- CI GREEN\n")
+			return outcome, summary
+		case ciCheckRed:
+			if !announced {
+				comment(fmt.Sprintf("🤖 GitHub CI failed; starting automated repair (up to %d round(s)).", opts.maxRetries))
+				announced = true
+			}
+			// The task may have been cancelled while we waited; do not spend a
+			// repair round on a task that no longer exists.
+			if !taskExists(namespaceForTask(task), task.Metadata.Name) {
+				outcome = ciWatchFailed
+				return outcome, "task cancelled while CI failing"
+			}
+			headSHA, shaErr := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if shaErr != nil {
+				outcome = ciWatchFailed
+				return outcome, fmt.Sprintf("get PR head sha: %v", shaErr)
+			}
+			annotations, annErr := collectFailedAnnotations(ctx, gh, owner, repo, headSHA)
+			if annErr != nil {
+				outcome = ciWatchFailed
+				return outcome, fmt.Sprintf("collect annotations: %v", annErr)
+			}
+			runs, _ := gh.ListCheckRuns(ctx, owner, repo, headSHA)
+			logSnippets, _ := collectFailedJobLogs(ctx, gh, owner, repo, runs, opts.logSnippetLines)
+			fmt.Fprintf(out, "--- CI FAILED (attempt %d/%d); repairing\n%s", attempt+1, opts.maxRetries, formatCIFailures(annotations))
+			if err := repair(annotations, logSnippets); err != nil {
+				// A failed repair pass is not the end: log it and let the next
+				// attempt try again, so the watch keeps repairing until CI is
+				// green or the budget (maxRetries / maxWait) is exhausted.
+				fmt.Fprintf(out, "--- REPAIR PASS %d/%d FAILED: %v\n", attempt+1, opts.maxRetries, err)
+				continue
+			}
+			roundsRepaired++
+			// The last repair push must get its result evaluated too: ending the
+			// loop directly after the final force-push would fail a task whose
+			// fix is already submitted. Wait one more cycle for that commit's CI
+			// before giving up.
+			if attempt == opts.maxRetries-1 {
+				fmt.Fprintf(out, "--- CI watch final round: waiting for the last fix's result\n")
+				finalDeadline := time.Now().Add(opts.maxWait)
+				finalStatus, finalSummary := waitForCIEvent(ctx, task, gh, owner, repo, number, w, opts, finalDeadline, false)
+				lastSummary = finalSummary
+				switch finalStatus {
+				case ciCheckGreen:
+					outcome = ciWatchGreen
+					fmt.Fprintf(out, "--- CI GREEN\n")
+					return outcome, finalSummary
+				case ciCheckRed:
+					outcome = ciWatchFailed
+					return outcome, fmt.Sprintf("CI still failing after %d repair attempts:\n%s", opts.maxRetries, lastSummary)
+				case ciCheckError:
+					outcome = ciWatchFailed
+					return outcome, fmt.Sprintf("check-runs API error: %s", finalSummary)
+				default:
+					outcome = ciWatchFailed
+					return outcome, fmt.Sprintf("CI still pending after %s", opts.maxWait)
+				}
+			}
+			// Fall through to the next attempt: wait for the re-pushed commit's
+			// check-suites to converge again before evaluating.
+		case ciCheckError:
+			outcome = ciWatchFailed
+			return outcome, fmt.Sprintf("check-runs API error: %s", summary)
+		default: // ciCheckPending with deadline hit
+			outcome = ciWatchFailed
+			return outcome, fmt.Sprintf("CI still pending after %s", opts.maxWait)
+		}
+	}
+	outcome = ciWatchFailed
+	return outcome, fmt.Sprintf("CI still failing after %d repair attempts:\n%s", opts.maxRetries, lastSummary)
+}
+
+// waitForCIEvent blocks until the check suites for the PR converge. It is
+// driven by check_suite / check_run completed webhook events (via w.notify)
+// rather than a settle timer, so a long CI flow is never misjudged as failed
+// just because 90s passed with no event. Verdict rules:
+//
+//   - A completed suite with a non-passing conclusion is terminal: red, no need
+//     to wait for the remaining suites or the confirm window.
+//   - Green requires every suite to be completed AND the confirm window T
+//     (opts.settleInterval) to elapse with no new suite registering. A new
+//     suite membership restarts T; an ordinary recheck never does.
+//   - An empty suite list is NOT converged (lazy registration windows, the
+//     instant after a force-push) — it can never be judged green.
+//   - maxWait only bounds total event-stream loss (webhook unconfigured/
+//     unreachable); long-running CI is not affected by it.
+//
+// Fresh-guard and stale-event gating: the PR-8 regression (a repair round
+// "fixing" code back to a broken state on stale evidence) came from evaluating
+// on a bootstrapped snapshot of the OLD commit after a repair force-push, when
+// GitHub's PR-head reflection still reported the superseded sha. Two guards
+// close it:
+//
+//   - bootstrap snapshots happen only on the FIRST call (the PR just created;
+//     CI may have already finished before the waiter registered). Repair-round
+//     calls are purely event-driven — no snapshot can judge red.
+//   - Each wake carries the event's head_sha. A wake is only evaluated when
+//     that sha equals the current PR head (or the event carries no sha); a late
+//     event for a superseded commit is ignored. Evidence is thus always scoped
+//     to the commit the event actually finished, never to the reflected head.
+//
+// task is used only for the cancellation check (taskExists) at the observation
+// point — the loop never polls for it.
+func waitForCIEvent(ctx context.Context, task *taskpkg.FactoryTask, gh ciClient, owner, repo string, number int, w *ciWaiter, opts ciWatchOptions, deadline time.Time, bootstrap bool) (ciCheckStatus, string) {
+	// known is the suite id set captured when the confirm window started; a
+	// membership change means a late suite registered and we must re-converge.
+	var known map[int64]bool
+	var confirm *time.Timer
+	var confirmC <-chan time.Time
+	// pendingHead/pendingC back the reflection-lag retry: when a webhook event
+	// names a head that PullRequestHeadSHA has not caught up to yet (right after
+	// a repair force-push), the event is not silently dropped — the head is
+	// remembered and a timer re-checks whether reflection has caught up. Without
+	// this, a burst of completed events arriving before the PR-head reflection
+	// updates is all "stale" and the wait starves forever even though CI is
+	// already green (observed: repair pushes a fix, PR checks all pass, server
+	// never evaluates and never posts the done label).
+	var pendingHead string
+	var pending *time.Timer
+	var pendingC <-chan time.Time
+	armPending := func(head string) {
+		pendingHead = head
+		if pending != nil {
+			if !pending.Stop() {
+				select {
+				case <-pending.C:
+				default:
+				}
+			}
+		}
+		pending = time.NewTimer(opts.settleInterval)
+		pendingC = pending.C
+	}
+	clearPending := func() {
+		if pending != nil {
+			if !pending.Stop() {
+				select {
+				case <-pending.C:
+				default:
+				}
+			}
+			pending = nil
+		}
+		pendingC = nil
+		pendingHead = ""
+	}
+
+	// listAt returns the suites belonging to head (the current PR head as seen
+	// by the caller when it resolved it). Only suites whose HeadSHA matches
+	// head count: after a repair force-push, the API can still briefly return
+	// the previous commit's failing suites; feeding those to fastRed/
+	// allCompleted would re-trigger red on evidence from an already-superseded
+	// commit and cause a repair round to "regress" the fix. A suite with HeadSHA
+	// empty (defensive) matches nothing and is dropped, so an unborn suite set
+	// reads as "not converged" until the new head's suites appear.
+	listAt := func(head string) ([]CheckSuite, string, error) {
+		suites, err := gh.ListCheckSuites(ctx, owner, repo, head)
+		if err != nil {
+			return nil, "", err
+		}
+		// A suite that GitHub leaves "queued" with no workflow run behind it
+		// never completes and would block convergence forever (observed: all
+		// check runs pass, one queued suite idles, the watch waits until
+		// maxWait). Tell it apart from a real queued/in_progress run by which
+		// suites actually have check runs; queued-without-a-run suites are
+		// ghosts and are dropped from the convergence view.
+		haveRun := make(map[int64]bool)
+		if runs, runErr := gh.ListCheckRuns(ctx, owner, repo, head); runErr == nil {
+			for _, r := range runs {
+				haveRun[r.CheckSuite.ID] = true
+			}
+		}
+		filtered := make([]CheckSuite, 0, len(suites))
+		for _, s := range suites {
+			if s.HeadSHA != head {
+				continue
+			}
+			if s.Status == "queued" && !haveRun[s.ID] {
+				continue // ghost suite: never runs, never completes
+			}
+			filtered = append(filtered, s)
+		}
+		return filtered, summarizeCheckSuites(filtered), nil
+	}
+	startConfirm := func(suites []CheckSuite) {
+		known = suiteIDs(suites)
+		confirm = time.NewTimer(opts.settleInterval)
+		confirmC = confirm.C
+	}
+	stopConfirm := func() {
+		if confirm != nil {
+			if !confirm.Stop() {
+				select {
+				case <-confirm.C:
+				default:
+				}
+			}
+			confirm = nil
+		}
+		confirmC = nil
+		known = nil
+	}
+
+	// One bootstrap snapshot, first call only: the CI may already have finished
+	// before our waiter registered (all events fired during setup). Without this
+	// the loop would wait for a completed event that will never come. Repair
+	// rounds (bootstrap=false) must never take a snapshot — after a force-push
+	// the reflected head may still be the old commit, whose failing suites would
+	// instantly judge red on stale evidence (the PR 8 regression).
+	if bootstrap {
+		head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+		if err != nil {
+			return ciCheckError, fmt.Sprintf("get PR head sha: %v", err)
+		}
+		suites, summary, err := listAt(head)
+		if err != nil {
+			return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+		}
+		if fastRedSuites(suites) {
+			return ciCheckRed, summary
+		}
+		if allSuitesCompleted(suites) {
+			startConfirm(suites)
+		}
+	}
+
+	for {
+		select {
+		case n := <-w.notify:
+			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if err != nil {
+				// Transient API error on a wake: keep waiting for the next
+				// event rather than fail the watch on a blip.
+				continue
+			}
+			if n.headSHA != "" && head != n.headSHA {
+				// The event names a commit that PullRequestHeadSHA does not
+				// report as the PR head yet. It is either a genuinely stale
+				// event for a superseded commit (evaluate never), or the head
+				// was just force-pushed and GitHub's PR-head reflection lags
+				// (evaluate once it catches up). Distinguish the two by
+				// remembering the head and retrying the reflection check later
+				// instead of silently dropping the event.
+				if n.headSHA != pendingHead {
+					armPending(n.headSHA)
+				}
+				continue
+			}
+			clearPending()
+			suites, summary, err := listAt(head)
+			if err != nil {
+				continue
+			}
+			if fastRedSuites(suites) {
+				if !bootstrap {
+					// Repair round: never fast-judge red. While the PR-head
+					// reflection lags right after a push, a late event for the
+					// superseded commit can carry the same head_sha as the
+					// lagging reflected head, so head equality alone is not
+					// proof the verdict is current. Defer to the confirm
+					// window: if the re-pushed commit's own events arrive (they
+					// always do — the new CI produces its own completed
+					// events), they carry a different head and supersede this
+					// stale one before it can be judged.
+					if confirmC == nil {
+						startConfirm(suites)
+					}
+					continue
+				}
+				stopConfirm()
+				return ciCheckRed, summary
+			}
+			if !allSuitesCompleted(suites) {
+				// Not converged yet: drop any window and keep waiting.
+				stopConfirm()
+				continue
+			}
+			if confirmC == nil {
+				startConfirm(suites)
+			} else if !sameSuiteIDs(known, suiteIDs(suites)) {
+				// A new suite registered inside the window: restart it so that
+				// suite's own late-registered siblings are still caught.
+				stopConfirm()
+				startConfirm(suites)
+			}
+			// Otherwise the window stays running untouched.
+		case <-pendingC:
+			// Reflection-lag retry for the pending event head: re-check whether
+			// PullRequestHeadSHA has caught up, then evaluate exactly like a
+			// matching event would. Without this the wait starves when all of a
+			// commit's completed events arrive before the reflection updates.
+			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if err != nil || head != pendingHead {
+				// Still lagging (or a transient error): try again later.
+				armPending(pendingHead)
+				continue
+			}
+			clearPending()
+			suites, summary, err := listAt(head)
+			if err != nil {
+				continue
+			}
+			if fastRedSuites(suites) {
+				if !bootstrap {
+					// Repair round: never fast-judge red; defer to the window so
+					// a genuine re-push event can supersede the verdict.
+					if confirmC == nil {
+						startConfirm(suites)
+					}
+					continue
+				}
+				stopConfirm()
+				return ciCheckRed, summary
+			}
+			if !allSuitesCompleted(suites) {
+				stopConfirm()
+				continue
+			}
+			if confirmC == nil {
+				startConfirm(suites)
+			} else if !sameSuiteIDs(known, suiteIDs(suites)) {
+				stopConfirm()
+				startConfirm(suites)
+			}
+		case <-confirmC:
+			// Window elapsed with no membership change: final convergence check.
+			head, err := gh.PullRequestHeadSHA(ctx, owner, repo, number)
+			if err != nil {
+				return ciCheckError, fmt.Sprintf("get PR head sha: %v", err)
+			}
+			suites, summary, err := listAt(head)
+			if err != nil {
+				return ciCheckError, fmt.Sprintf("list check suites: %v", err)
+			}
+			if fastRedSuites(suites) {
+				stopConfirm()
+				return ciCheckRed, summary
+			}
+			if !allSuitesCompleted(suites) || !sameSuiteIDs(known, suiteIDs(suites)) {
+				// The world moved exactly as the window closed: re-converge.
+				if allSuitesCompleted(suites) {
+					// A new suite registered: restart the window from it.
+					stopConfirm()
+					startConfirm(suites)
+					continue
+				}
+				stopConfirm()
+				continue
+			}
+			if !taskExists(namespaceForTask(task), task.Metadata.Name) {
+				stopConfirm()
+				return ciCheckPending, "task cancelled while waiting for CI"
+			}
+			stopConfirm()
+			return evaluateCheckSuites(suites), summary
+		case <-time.After(time.Until(deadline)):
+			return ciCheckPending, fmt.Sprintf("CI events not observed before %s", opts.maxWait)
+		}
+	}
+}
+
+// resolveCIWatchOptions resolves CI watch/repair tuning. Start from the CLI
+// flag defaults (cobra has already applied them to opts), then CI_WATCH_*
+// env/secret-file values override via ReadConfig for hot-reload.
+func resolveCIWatchOptions() ciWatchOptions {
+	o := ciWatchOptions{
+		maxRetries:       opts.CIWatchMaxRetries,
+		maxWait:          opts.CIWatchMaxWait,
+		settleInterval:   opts.CIWatchSettleInterval,
+		allowTestChanges: true, // PR #929 classes of failures need test edits
+		logSnippetLines:  ciWatchDefaultsLogSnippetLines,
+		maxToolRounds:    ciWatchDefaultsMaxToolRounds, // inherited session makes full re-exploration wasteful
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_MAX_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			o.maxRetries = n
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_MAX_WAIT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			o.maxWait = d
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_SETTLE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			o.settleInterval = d
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_MAX_TOOL_ROUNDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			o.maxToolRounds = n
+		}
+	}
+	if v := taskpkg.ReadConfig("CI_WATCH_LOG_SNIPPET_LINES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			o.logSnippetLines = n
+		}
+	}
+	return o
+}
+
+// ciRepairRunnerFor builds the default ciRepairRunner: it renders the strict
+// repair instructions from the collected annotations/log snippets, builds the
+// repair script (which commits and force-pushes the fix), and executes it in
+// the reused sandbox.
+func ciRepairRunnerFor(task *taskpkg.FactoryTask, namespace, sandboxName, prURL string, opts ciWatchOptions) ciRepairRunner {
+	containerName := task.Spec.Sandbox.ContainerName
+	if containerName == "" {
+		containerName = "dev"
+	}
+	return func(annotations []CheckRunAnnotation, logSnippets []JobLogSnippet) error {
+		instructions := buildCIRepairInstructions(task.Spec.Work.Instructions, prURL, annotations, logSnippets, opts.allowTestChanges, opts.logSnippetLines)
+		script, err := taskpkg.BuildCIRepairScript(task, instructions, taskpkg.CIRepairOptions{
+			SessionFile:   taskpkg.CISessionFile,
+			MaxToolRounds: opts.maxToolRounds,
+		})
+		if err != nil {
+			return err
+		}
+		return runRepairScriptInSandbox(namespace, sandboxName, containerName, script)
+	}
+}
+
+// repairExecArgs builds the kubectl exec argv for streaming a repair script
+// into the sandbox over stdin. The script never appears in argv: it embeds the
+// full CI evidence (annotations + job-log snippets) base64-encoded, which can
+// exceed the kernel per-argument ceiling (MAX_ARG_STRLEN, 128 KiB) — passing it
+// as a single `sh -lc "<script>"` argument makes kubectl's own execve fail with
+// E2BIG ("argument list too long") before anything runs, so the repair round
+// dies silently and no commit is pushed. The argv here is a short, fixed
+// snippet: materialize the incoming stdin to a file, then run it from disk.
+func repairExecArgs(namespace, sandboxName, containerName string) []string {
+	return []string{
+		"exec", "-i", "-n", namespace, sandboxName, "-c", containerName, "--",
+		"/bin/sh", "-lc", "cat > /tmp/ai-factory-repair.sh && sh /tmp/ai-factory-repair.sh",
+	}
+}
+
+// runRepairScriptInSandbox executes a CI repair script in the sandbox by
+// streaming it over kubectl exec stdin (exec -i ... -- sh), then running the
+// materialized /tmp/ai-factory-repair.sh from disk — identical semantics to a
+// direct `sh script` with no argument-size ceiling.
+func runRepairScriptInSandbox(namespace, sandboxName, containerName, script string) error {
+	args := repairExecArgs(namespace, sandboxName, containerName)
+	cmd := exec.Command("kubectl", args...)
+	cmd.Stdin = strings.NewReader(script)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	if err := cmd.Run(); err != nil {
+		return kubectlCommandError{
+			args:   args,
+			err:    err,
+			stdout: stdout.String(),
+			stderr: stderr.String(),
+		}
+	}
+	return nil
+}
+
+// reportCIWatchEnabled reports whether CI watching is enabled: the
+// CI_WATCH_ENABLED ConfigMap/secret value (hot-updateable via
+// update-config.sh) wins, otherwise the --ci-watch flag default.
+func reportCIWatchEnabled() bool {
+	if v := taskpkg.ReadConfig("CI_WATCH_ENABLED"); v != "" {
+		return strings.EqualFold(v, "true") || v == "1"
+	}
+	return opts.CIWatchEnabled
 }

@@ -16,7 +16,12 @@ FROM node:22-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG INSTALL_CODEX_CLI=false
-ARG GO_VERSION=1.25.4
+# Sandbox Go toolchain. Keep this >= the highest `go` directive any target
+# repo requires: the sandbox is offline, so `go` commands must never try to
+# auto-download a newer toolchain (proxy.golang.org is unreachable). Bump when
+# a target repo raises its go.mod `go` line. package.sh overrides this via
+# --build-arg with the AI_FACTORY_GO_VERSION env (default: ai-factory go.mod).
+ARG GO_VERSION=1.25.12
 
 ENV HOME=/home/agent \
     WORKSPACE=/workspace \
@@ -70,6 +75,7 @@ COPY ai-factory-agent.py /usr/local/bin/ai-factory-agent.py
 COPY agent_budget.py /usr/local/bin/agent_budget.py
 COPY agent_config.py /usr/local/bin/agent_config.py
 COPY agent_images.py /usr/local/bin/agent_images.py
+COPY agent_session.py /usr/local/bin/agent_session.py
 COPY repair_loop.py /usr/local/bin/repair_loop.py
 COPY repair_prompt.py /usr/local/bin/repair_prompt.py
 COPY script_validation.py /usr/local/bin/script_validation.py
@@ -80,11 +86,12 @@ RUN sed -i 's/\r$//' /usr/local/bin/ai-factory-agent \
     /usr/local/bin/agent_budget.py \
     /usr/local/bin/agent_config.py \
     /usr/local/bin/agent_images.py \
+    /usr/local/bin/agent_session.py \
     /usr/local/bin/repair_loop.py \
     /usr/local/bin/repair_prompt.py \
     /usr/local/bin/script_validation.py
 
-RUN chmod 755 /usr/local/bin/ai-factory-agent /usr/local/bin/ai-factory-agent.py /usr/local/bin/agent_budget.py /usr/local/bin/agent_config.py /usr/local/bin/agent_images.py /usr/local/bin/repair_loop.py /usr/local/bin/script_validation.py /usr/local/bin/ai-factory-sandbox-entrypoint \
+RUN chmod 755 /usr/local/bin/ai-factory-agent /usr/local/bin/ai-factory-agent.py /usr/local/bin/agent_budget.py /usr/local/bin/agent_config.py /usr/local/bin/agent_images.py /usr/local/bin/agent_session.py /usr/local/bin/repair_loop.py /usr/local/bin/script_validation.py /usr/local/bin/ai-factory-sandbox-entrypoint \
     && useradd --create-home --home-dir "${HOME}" --shell /bin/bash agent \
     && mkdir -p "${WORKSPACE}" \
     && chown -R agent:agent "${HOME}" "${WORKSPACE}"

@@ -108,11 +108,20 @@ echo "   ✓ ai-factory-server.tar"
 
 # 2. 构建 sandbox 镜像
 echo "2. 构建 coding-agent-sandbox 镜像..."
-GO_VERSION="$(awk '/^go / {print $2; exit}' "${ROOT_DIR}/go.mod")"
+# Sandbox Go toolchain version. Defaults to the value baked into the
+# Dockerfile (compatible with known target repos); AI_FACTORY_GO_VERSION
+# overrides it when a target repo requires a newer toolchain than the sandbox
+# ships. Do NOT default this to ai-factory's own go.mod version — the sandbox
+# must serve target repos, whose go directive may be higher, and it is offline
+# (no proxy.golang.org), so a toolchain auto-download would hang the build.
+GO_VERSION="${GO_VERSION:-${AI_FACTORY_GO_VERSION:-}}"
+SANDBOX_BUILD_ARGS=(--build-arg INSTALL_CODEX_CLI=true)
+if [[ -n "${GO_VERSION}" ]]; then
+    SANDBOX_BUILD_ARGS+=(--build-arg "GO_VERSION=${GO_VERSION}")
+fi
 ${CONTAINER_CMD} build "${PROXY_BUILD_ARGS[@]}" "${BUILD_EXTRA_ARGS[@]}" \
     --provenance=false --sbom=false \
-    --build-arg GO_VERSION="${GO_VERSION}" \
-    --build-arg INSTALL_CODEX_CLI=true \
+    "${SANDBOX_BUILD_ARGS[@]}" \
     -t coding-agent-sandbox:latest \
     "${ROOT_DIR}/components/agent-sandbox-images/coding-agent"
 ${CONTAINER_CMD} save coding-agent-sandbox:latest > "${OUTPUT_DIR}/coding-agent-sandbox.tar"
