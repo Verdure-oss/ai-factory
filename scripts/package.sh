@@ -218,7 +218,15 @@ echo "   ✓ ai-factory.env（配置模板，部署前填写真实值）"
 echo "6. 复制 CRD 安装脚本..."
 mkdir -p "${OUTPUT_DIR}/components"
 cp -r "${ROOT_DIR}/components/factory-task" "${OUTPUT_DIR}/components/" 2>/dev/null || true
+chmod +x "${OUTPUT_DIR}/components/factory-task/install" 2>/dev/null || true
 cp -r "${ROOT_DIR}/components/agent-sandbox" "${OUTPUT_DIR}/components/" 2>/dev/null || true
+chmod +x "${OUTPUT_DIR}/components/agent-sandbox/install" 2>/dev/null || true
+
+# 规范化打包目录中的文本文件，避免跨机器传输后 Bash 遇到 CRLF。
+while IFS= read -r -d '' file; do
+    sed -i 's/\r$//' "${file}"
+done < <(find "${OUTPUT_DIR}" -type f ! -name '*.tar' -print0)
+
 echo "   ✓ components/"
 
 echo ""

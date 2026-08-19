@@ -158,6 +158,12 @@ if kubectl get deployment agent-sandbox-controller -n agent-sandbox-system &>/de
     kubectl set image deployment/agent-sandbox-controller \
         agent-sandbox-controller=ai-factory/agent-sandbox-controller:latest \
         -n agent-sandbox-system
+    # 若该 Deployment 的 imagePullPolicy 为 Always（上游 deploy-to-kube 对
+    # :latest 的默认值），kubelet 会忽略本地已导入镜像先去 docker.io 拉取，
+    # 导致 ImagePullBackOff。强制改为 IfNotPresent，使用本地镜像。
+    kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller \
+        -p '{"spec":{"template":{"spec":{"containers":[{"name":"agent-sandbox-controller","imagePullPolicy":"IfNotPresent"}]}}}}' \
+        >/dev/null || true
     kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
     echo "   ✓ agent-sandbox 控制器已更新"
 else
