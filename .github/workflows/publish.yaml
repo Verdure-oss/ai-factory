@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -91,7 +91,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            GO_VERSION=${{ vars.GO_VERSION || '' }}
+            GO_VERSION=1.25.12
             INSTALL_CODEX_CLI=true
           tags: |
             ghcr.io/verdure-oss/coding-agent-sandbox:${{ steps.version.outputs.version }}
