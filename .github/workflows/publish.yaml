@@ -62,6 +62,15 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "resolved version: ${VERSION}"
+          # Helm chart version 必须是 SemVer；非 tag 触发（workflow_dispatch）
+          # 会拿到短 SHA，需转成合法的 prerelease 版本
+          if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            CHART_VERSION="${VERSION}"
+          else
+            CHART_VERSION="0.0.0-dev.${VERSION}"
+          fi
+          echo "chartVersion=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "resolved chartVersion: ${CHART_VERSION}"
 
       # --- 1. ai-factory-server ---
       - name: Build and push ai-factory-server
@@ -127,7 +136,8 @@ jobs:
       - name: Package and push Helm chart
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          # helm package 会把 Chart.yaml 的 version 作为包版本，用 --version 覆盖
-          helm package charts/ai-factory --version "${VERSION}" --app-version "${VERSION}" -d /tmp/chart
+          CHART_VERSION="${{ steps.version.outputs.chartVersion }}"
+          # --version 必须是 SemVer；非 tag 触发时 CHART_VERSION 为 0.0.0-dev.<sha>
+          helm package charts/ai-factory --version "${CHART_VERSION}" --app-version "${VERSION}" -d /tmp/chart
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
           helm push /tmp/chart/ai-factory-*.tgz oci://ghcr.io/verdure-oss/charts
