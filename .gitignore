@@ -37,3 +37,5 @@ factory.exe
 
 # Config files with real credentials (never commit)
 scripts/ai-factory.env
+
+orign_code/
