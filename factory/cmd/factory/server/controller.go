@@ -190,22 +190,35 @@ func isTaskQueued(task *taskpkg.FactoryTask) bool {
 	return false
 }
 
-// setIssueWaitingLabel sets the GitHub ai-factory-waiting label for a task.
-func setIssueWaitingLabel(task *taskpkg.FactoryTask) {
-	if task.Spec.Source.Provider != taskpkg.ProviderGitHub {
-		return
+// issueReporterFor returns the reporter and parsed issue number for a task, or
+// ok=false when the task cannot be reported on (no provider reporter, no token,
+// missing repo/issue). GitLab reporters get their API base filled from the
+// task's source host.
+func issueReporterFor(task *taskpkg.FactoryTask) (IssueReporter, string, int, bool) {
+	r := newIssueReporter(task.Spec.Source.Provider)
+	if r == nil || !r.HasToken() {
+		return nil, "", 0, false
 	}
-	gh := NewGitHubClient()
-	if !gh.HasToken() {
-		return
+	if gl, ok := r.(*GitLabClient); ok {
+		gl.SetHostFromRepositoryURL(task.Spec.Source.Host)
 	}
 	repo := task.Spec.Source.Repository
 	issueNum := 0
 	fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
 	if repo == "" || issueNum <= 0 {
+		return nil, "", 0, false
+	}
+	return r, repo, issueNum, true
+}
+
+// setIssueWaitingLabel sets the ai-factory-waiting label for a task on whichever
+// provider it came from.
+func setIssueWaitingLabel(task *taskpkg.FactoryTask) {
+	r, repo, issueNum, ok := issueReporterFor(task)
+	if !ok {
 		return
 	}
-	_ = gh.SetTaskWaiting(context.Background(), repo, issueNum)
+	_ = r.SetTaskWaiting(context.Background(), repo, issueNum)
 }
 
 func shouldReconcile(task taskpkg.FactoryTask) bool {
@@ -534,50 +547,32 @@ func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message s
 }
 
 func updateTaskLabels(task *taskpkg.FactoryTask, phase string) {
-	if task.Spec.Source.Provider != taskpkg.ProviderGitHub {
-		return
-	}
-	gh := NewGitHubClient()
-	if !gh.HasToken() {
-		return
-	}
-	repo := task.Spec.Source.Repository
-	issueNum := 0
-	fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
-	if repo == "" || issueNum <= 0 {
+	r, repo, issueNum, ok := issueReporterFor(task)
+	if !ok {
 		return
 	}
 	ctx := context.Background()
 	switch phase {
 	case taskpkg.PhaseSucceeded:
-		_ = gh.SetTaskDone(ctx, repo, issueNum)
+		_ = r.SetTaskDone(ctx, repo, issueNum)
 	case taskpkg.PhaseFailed:
-		_ = gh.SetTaskFailed(ctx, repo, issueNum)
+		_ = r.SetTaskFailed(ctx, repo, issueNum)
 	}
 }
 
-// updateIntermediateLabel sets the appropriate GitHub label during task execution.
+// updateIntermediateLabel sets the appropriate issue label during task execution.
 // Called when transitioning between ClaimCreated (waiting) and SandboxReady (running).
 func updateIntermediateLabel(task *taskpkg.FactoryTask, phase string) {
-	if task.Spec.Source.Provider != taskpkg.ProviderGitHub {
-		return
-	}
-	gh := NewGitHubClient()
-	if !gh.HasToken() {
-		return
-	}
-	repo := task.Spec.Source.Repository
-	issueNum := 0
-	fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
-	if repo == "" || issueNum <= 0 {
+	r, repo, issueNum, ok := issueReporterFor(task)
+	if !ok {
 		return
 	}
 	ctx := context.Background()
 	switch phase {
 	case taskpkg.PhaseClaimCreated:
-		_ = gh.SetTaskWaiting(ctx, repo, issueNum)
+		_ = r.SetTaskWaiting(ctx, repo, issueNum)
 	case taskpkg.PhaseSandboxReady:
-		_ = gh.SetTaskRunning(ctx, repo, issueNum)
+		_ = r.SetTaskRunning(ctx, repo, issueNum)
 	}
 }
 

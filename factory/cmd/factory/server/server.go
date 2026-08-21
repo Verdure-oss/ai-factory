@@ -407,15 +407,9 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 
 		// Set labels on first creation or after deleting terminal task
 		// No comment here — the controller posts it to avoid duplicates
-		if shouldSetLabels && provider == taskpkg.ProviderGitHub {
-			gh := NewGitHubClient()
-			if gh.HasToken() && task.Spec.Trigger.URL != "" {
-				repo := task.Spec.Source.Repository
-				issueNum := 0
-				fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
-				if repo != "" && issueNum > 0 {
-					_ = gh.SetTaskRunning(req.Context(), repo, issueNum)
-				}
+		if shouldSetLabels {
+			if r, repo, issueNum, ok := issueReporterFor(task); ok && task.Spec.Trigger.URL != "" {
+				_ = r.SetTaskRunning(req.Context(), repo, issueNum)
 			}
 		}
 
