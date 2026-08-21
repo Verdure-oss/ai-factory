@@ -40,7 +40,7 @@ func newIssueReporter(provider string) IssueReporter {
 	case taskpkg.ProviderGitHub:
 		return NewGitHubClient()
 	case taskpkg.ProviderGitLab:
-		return nil // TODO(task3): return NewGitLabClient()
+		return NewGitLabClient()
 	default:
 		return nil
 	}
