@@ -8,8 +8,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="${NAMESPACE:-ai-factory}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 REGISTRY="${REGISTRY:-ghcr.io}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/verdure-oss}"
+# Helm repository 值不能包含尾部斜杠；agent-sandbox 安装时再单独补上。
+IMAGE_PREFIX="${IMAGE_PREFIX%/}"
 
 # 版本：参数 > 环境变量 > latest；自动去 v 前缀
 VERSION="${1:-${VERSION:-${IMAGE_TAG:-latest}}}"
@@ -49,12 +52,15 @@ fi
 
 # agent-sandbox: 直接用 GHCR 镜像部署，不走本地构建
 if [[ -f "${SCRIPT_DIR}/../components/agent-sandbox/install" ]]; then
-  export IMAGE_PREFIX="${IMAGE_PREFIX}/"
-  export IMAGE_TAG="${VERSION}"
-  export AGENT_SANDBOX_BUILD_IMAGES=false
-  # 若用户在 VM 上没有 agent-sandbox 源码，install 会自行 git clone
-  bash "${SCRIPT_DIR}/../components/agent-sandbox/install"
-  echo "   ✓ agent-sandbox CRD (image: ${IMAGE_PREFIX}agent-sandbox-controller:${VERSION})"
+  CONTROLLER_IMAGE_PREFIX="${IMAGE_PREFIX}/"
+  (
+    export IMAGE_PREFIX="${CONTROLLER_IMAGE_PREFIX}"
+    export IMAGE_TAG="${VERSION}"
+    export AGENT_SANDBOX_BUILD_IMAGES=false
+    # 若用户在 VM 上没有 agent-sandbox 源码，install 会自行 git clone
+    bash "${SCRIPT_DIR}/../components/agent-sandbox/install"
+  )
+  echo "   ✓ agent-sandbox CRD (image: ${CONTROLLER_IMAGE_PREFIX}agent-sandbox-controller:${VERSION})"
 else
   echo "   ⚠ agent-sandbox 安装脚本未找到，跳过"
 fi
@@ -182,9 +188,9 @@ helm upgrade --install ai-factory "${CHART_REF}" \
 # 4. 等待就绪
 echo ""
 echo "4. 等待部署完成..."
-kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
+kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 if kubectl get deployment agent-sandbox-controller -n agent-sandbox-system &>/dev/null; then
-  kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
+  kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout="${ROLLOUT_TIMEOUT}"
   echo "   ✓ agent-sandbox 控制器已就绪"
 fi
 

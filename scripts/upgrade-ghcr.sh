@@ -8,8 +8,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="${NAMESPACE:-ai-factory}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-300s}"
 REGISTRY="${REGISTRY:-ghcr.io}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/verdure-oss}"
+IMAGE_PREFIX="${IMAGE_PREFIX%/}"
 VERSION="${1:-${VERSION:-${IMAGE_TAG:-latest}}}"
 VERSION="${VERSION#v}"
 if [[ "${VERSION}" == "latest" ]]; then
@@ -103,11 +105,11 @@ echo "   ✓ Helm chart 已升级"
 # 3. 等待 server 就绪 + 强制重建（:latest/固定 tag 都可能被缓存，需 restart）
 echo ""
 echo "3. 等待 ai-factory-server 就绪..."
-kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
+kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 echo ""
 echo "3.1 强制重建 ai-factory-server..."
 kubectl rollout restart deployment/ai-factory-server -n "${NAMESPACE}"
-kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout=120s
+kubectl rollout status deployment/ai-factory-server -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}"
 echo "   ✓ ai-factory-server 已重建"
 
 # 4. 更新 agent-sandbox 控制器到 GHCR 版本
@@ -118,7 +120,7 @@ if kubectl get deployment agent-sandbox-controller -n agent-sandbox-system &>/de
     agent-sandbox-controller="${IMAGE_PREFIX}/agent-sandbox-controller:${VERSION}" -n agent-sandbox-system
   kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller \
     -p '{"spec":{"template":{"spec":{"containers":[{"name":"agent-sandbox-controller","imagePullPolicy":"IfNotPresent"}]}}}}' >/dev/null || true
-  kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
+  kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system --timeout="${ROLLOUT_TIMEOUT}"
   echo "   ✓ agent-sandbox 控制器已更新"
 else
   echo "   ⚠ agent-sandbox 控制器未找到，跳过"
