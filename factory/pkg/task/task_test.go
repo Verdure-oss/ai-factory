@@ -15,6 +15,7 @@
 package task
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -446,7 +447,7 @@ func TestRunAgentScriptIncludesProviderNeutralSandboxTools(t *testing.T) {
 		"codex exec --full-auto",
 	} {
 		t.Run(agentCommand, func(t *testing.T) {
-			script := runAgentScript("/workspace/repo", "Fix the issue.", "", agentCommand)
+			script := runAgentScript("/workspace/repo", "Fix the issue.", "", agentCommand, nil)
 			for _, want := range []string{
 				"Sandbox tool constraints",
 				"Known development tools include git, go, make, node, npm, python3",
@@ -461,6 +462,43 @@ func TestRunAgentScriptIncludesProviderNeutralSandboxTools(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunAgentScriptValidationPolicy(t *testing.T) {
+	script := runAgentScript("/workspace/repo", "Fix the issue.", "", "ai-factory-agent openai-compatible", nil)
+	encodedPolicy := base64.StdEncoding.EncodeToString([]byte(validationPolicy(nil)))
+	if !strings.Contains(script, encodedPolicy) {
+		t.Fatalf("agent script should append the unconfigured validation policy: %s", script)
+	}
+	if !strings.Contains(validationPolicy(nil), "Do not invent or run repository-wide build/test commands") {
+		t.Fatalf("validation policy should forbid self-selected repository-wide validation: %s", validationPolicy(nil))
+	}
+}
+
+func TestRunAgentScriptIncludesConfiguredValidationPolicy(t *testing.T) {
+	commands := []string{"go test ./factory/pkg/task"}
+	script := runAgentScript("/workspace/repo", "Fix the issue.", "", "ai-factory-agent openai-compatible", commands)
+	encodedPolicy := base64.StdEncoding.EncodeToString([]byte(validationPolicy(commands)))
+	if !strings.Contains(script, encodedPolicy) {
+		t.Fatalf("agent script should append configured validation policy: %s", script)
+	}
+}
+
+func TestValidationPolicyListsConfiguredCommands(t *testing.T) {
+	policy := validationPolicy([]string{"go test ./pkg/...", "npm test"})
+	for _, want := range []string{
+		"The controller will run only these configured validation commands",
+		"- go test ./pkg/...",
+		"- npm test",
+		"Do not add other repository-wide build or test commands beyond this list.",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Fatalf("validation policy missing %q: %s", want, policy)
+		}
+	}
+	if strings.Contains(policy, "No validation commands are configured") {
+		t.Fatalf("configured validation policy incorrectly says no commands are configured: %s", policy)
 	}
 }
 
