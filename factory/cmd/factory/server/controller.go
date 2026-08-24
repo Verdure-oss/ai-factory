@@ -195,7 +195,17 @@ func isTaskQueued(task *taskpkg.FactoryTask) bool {
 // missing repo/issue). GitLab reporters get their API base filled from the
 // task's source host.
 func issueReporterFor(task *taskpkg.FactoryTask) (IssueReporter, string, int, bool) {
-	r := newIssueReporter(task.Spec.Source.Provider)
+	return reporterForProvider(task, task.Spec.Source.Provider)
+}
+
+// commentReporterFor resolves the provider used by the reporting section while
+// keeping comment delivery independent from the human-facing target URL format.
+func commentReporterFor(task *taskpkg.FactoryTask) (IssueReporter, string, int, bool) {
+	return reporterForProvider(task, reportingProvider(task))
+}
+
+func reporterForProvider(task *taskpkg.FactoryTask, provider string) (IssueReporter, string, int, bool) {
+	r := newIssueReporter(provider)
 	if r == nil || !r.HasToken() {
 		return nil, "", 0, false
 	}
@@ -255,7 +265,7 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 		return err
 	}
 	// Post "started" comment once (not in webhook, to avoid duplicates from label events)
-	postStartedComment(task)
+	postStartedComment(out, task)
 	if err := runKubectlWithInput(manifest, "apply", "-f", "-"); err != nil {
 		_ = patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
 			Phase:   taskpkg.PhaseFailed,
@@ -502,18 +512,17 @@ func validateChangeRequestResult(task *taskpkg.FactoryTask, resultURL string, al
 	return fmt.Errorf("no change request created: provider returned no change request URL")
 }
 
-func postStartedComment(task *taskpkg.FactoryTask) {
+func postStartedComment(out io.Writer, task *taskpkg.FactoryTask) {
 	if !opts.ReportEnabled || task.Spec.Reporting.Mode != "comment" || task.Spec.Reporting.TargetURL == "" {
 		return
 	}
 	body := fmt.Sprintf("ai-factory started processing this issue.\n\n- FactoryTask: %s/%s", namespaceForTask(task), task.Metadata.Name)
-	if err := taskpkg.PostIssueComment(context.Background(), taskpkg.CommentReportOptions{
-		Provider:  reportingProvider(task),
-		TargetURL: task.Spec.Reporting.TargetURL,
-		Body:      body,
-		APIBase:   reportingAPIBase(task),
-	}); err != nil {
+	r, repo, issueNum, ok := commentReporterFor(task)
+	if !ok {
 		return
+	}
+	if err := r.PostComment(context.Background(), repo, issueNum, body); err != nil {
+		fmt.Fprintf(out, "--- START REPORT FAILED: %v\n", err)
 	}
 }
 
@@ -534,12 +543,11 @@ func reportTaskResult(out io.Writer, task *taskpkg.FactoryTask, phase, message s
 	}
 	fc := taskpkg.ClassifyFailure(message)
 	body := buildReportMessage(task, phase, fc)
-	if err := taskpkg.PostIssueComment(context.Background(), taskpkg.CommentReportOptions{
-		Provider:  reportingProvider(task),
-		TargetURL: task.Spec.Reporting.TargetURL,
-		Body:      body,
-		APIBase:   reportingAPIBase(task),
-	}); err != nil {
+	r, repo, issueNum, ok := commentReporterFor(task)
+	if !ok {
+		return
+	}
+	if err := r.PostComment(context.Background(), repo, issueNum, body); err != nil {
 		fmt.Fprintf(out, "--- REPORT FAILED: %v\n", err)
 		return
 	}
@@ -707,17 +715,6 @@ func reportingProvider(task *taskpkg.FactoryTask) string {
 		return task.Spec.Reporting.Provider
 	}
 	return task.Spec.Source.Provider
-}
-
-// reportingAPIBase returns the API base override for the task's reporting
-// provider, mirroring how NewGitHubClient honors GITHUB_API_BASE. It returns
-// "" when the provider has no override configured, in which case
-// PostIssueComment uses the provider default.
-func reportingAPIBase(task *taskpkg.FactoryTask) string {
-	if reportingProvider(task) == taskpkg.ProviderGitHub {
-		return taskpkg.ReadConfig("GITHUB_API_BASE")
-	}
-	return ""
 }
 
 func patchTaskStatus(namespace, name string, opts taskpkg.StatusPatchOptions) error {
