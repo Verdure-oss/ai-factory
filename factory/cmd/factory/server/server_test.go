@@ -17,6 +17,8 @@ package server
 import (
 	"os"
 	"testing"
+
+	taskpkg "github.com/ai-on-gke/ai-factory/factory/pkg/task"
 )
 
 func TestResolveGitProviderValid(t *testing.T) {
@@ -29,6 +31,71 @@ func TestResolveGitProviderValid(t *testing.T) {
 		if got != p {
 			t.Fatalf("resolveGitProvider(%q) = %q", p, got)
 		}
+	}
+}
+
+func TestWebhookOptionsAcceptIssueCreationActions(t *testing.T) {
+	options := webhookOptions("gitlab")
+	for _, action := range []string{"open", "opened", "labeled"} {
+		found := false
+		for _, configured := range options.TriggerActions {
+			if configured == action {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("TriggerActions = %#v, missing %q", options.TriggerActions, action)
+		}
+	}
+}
+
+func TestWebhookOptionsAcceptGitLabIssueCreatedWithTriggerLabels(t *testing.T) {
+	payload := []byte(`{
+		"object_kind": "issue",
+		"project": {
+			"path_with_namespace": "group/project",
+			"web_url": "https://gitlab.example.com/group/project"
+		},
+		"object_attributes": {
+			"iid": 4,
+			"action": "open",
+			"url": "https://gitlab.example.com/group/project/-/issues/4",
+			"labels": [
+				{"title": "ai-factory"},
+				{"title": "ai-factory-run"}
+			]
+		}
+	}`)
+	event, err := taskpkg.ParseIssueWebhook(payload, taskpkg.ProviderGitLab)
+	if err != nil {
+		t.Fatalf("ParseIssueWebhook() error = %v", err)
+	}
+	if ok, reason := taskpkg.ShouldTriggerIssue(event, webhookOptions(taskpkg.ProviderGitLab)); !ok {
+		t.Fatalf("ShouldTriggerIssue() = false, reason %q", reason)
+	}
+}
+
+func TestWebhookOptionsIgnoreGitLabIssueCreatedWithoutTriggerLabels(t *testing.T) {
+	payload := []byte(`{
+		"object_kind": "issue",
+		"project": {
+			"path_with_namespace": "group/project",
+			"web_url": "https://gitlab.example.com/group/project"
+		},
+		"object_attributes": {
+			"iid": 4,
+			"action": "open",
+			"url": "https://gitlab.example.com/group/project/-/issues/4",
+			"labels": [{"title": "ai-factory"}]
+		}
+	}`)
+	event, err := taskpkg.ParseIssueWebhook(payload, taskpkg.ProviderGitLab)
+	if err != nil {
+		t.Fatalf("ParseIssueWebhook() error = %v", err)
+	}
+	if ok, reason := taskpkg.ShouldTriggerIssue(event, webhookOptions(taskpkg.ProviderGitLab)); ok {
+		t.Fatalf("ShouldTriggerIssue() = true, reason %q; want ignored event", reason)
 	}
 }
 
