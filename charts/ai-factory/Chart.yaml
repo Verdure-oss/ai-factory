@@ -2,12 +2,13 @@ apiVersion: v2
 name: ai-factory
 description: A Helm chart for ai-factory self-hosted service
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 keywords:
   - ai-factory
   - coding-agent
   - github-webhook
+  - gitlab-webhook
 home: https://github.com/Verdure-oss/ai-factory
 maintainers:
   - name: verdure-oss
