@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="${NAMESPACE:-ai-factory}"
 REGISTRY="${REGISTRY:-ghcr.io}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/verdure-oss}"
+# 统一去掉尾斜杠：本脚本余下部分都按 "${IMAGE_PREFIX}/name" 拼接，用户若传入
+# 带尾斜杠的值（components/ 目录的约定就是带尾斜杠）会拼出双斜杠的非法镜像名。
+IMAGE_PREFIX="${IMAGE_PREFIX%/}"
 
 # 版本：参数 > 环境变量 > latest；自动去 v 前缀
 VERSION="${1:-${VERSION:-${IMAGE_TAG:-latest}}}"
@@ -49,12 +52,15 @@ fi
 
 # agent-sandbox: 直接用 GHCR 镜像部署，不走本地构建
 if [[ -f "${SCRIPT_DIR}/../components/agent-sandbox/install" ]]; then
-  export IMAGE_PREFIX="${IMAGE_PREFIX}/"
-  export IMAGE_TAG="${VERSION}"
-  export AGENT_SANDBOX_BUILD_IMAGES=false
-  # 若用户在 VM 上没有 agent-sandbox 源码，install 会自行 git clone
-  bash "${SCRIPT_DIR}/../components/agent-sandbox/install"
-  echo "   ✓ agent-sandbox CRD (image: ${IMAGE_PREFIX}agent-sandbox-controller:${VERSION})"
+  # components/agent-sandbox/install 要求 IMAGE_PREFIX 以 / 结尾，而本脚本余下
+  # 部分（helm --set）要求不带尾斜杠。只在子进程的环境里加尾斜杠，绝不改动本
+  # 脚本自己的 IMAGE_PREFIX —— 否则后面会拼出 ghcr.io/verdure-oss//ai-factory-server
+  # 这种双斜杠镜像名，kubelet 报 InvalidImageName。
+  AGENT_SANDBOX_BUILD_IMAGES=false \
+  IMAGE_TAG="${VERSION}" \
+  IMAGE_PREFIX="${IMAGE_PREFIX%/}/" \
+    bash "${SCRIPT_DIR}/../components/agent-sandbox/install"
+  echo "   ✓ agent-sandbox CRD (image: ${IMAGE_PREFIX%/}/agent-sandbox-controller:${VERSION})"
 else
   echo "   ⚠ agent-sandbox 安装脚本未找到，跳过"
 fi

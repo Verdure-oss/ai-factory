@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="${NAMESPACE:-ai-factory}"
 REGISTRY="${REGISTRY:-ghcr.io}"
 IMAGE_PREFIX="${IMAGE_PREFIX:-ghcr.io/verdure-oss}"
+# 统一去掉尾斜杠：下面都按 "${IMAGE_PREFIX}/name" 拼接，带尾斜杠会拼出
+# ghcr.io/verdure-oss//name 这种非法镜像名（kubelet 报 InvalidImageName）。
+IMAGE_PREFIX="${IMAGE_PREFIX%/}"
 VERSION="${1:-${VERSION:-${IMAGE_TAG:-latest}}}"
 VERSION="${VERSION#v}"
 if [[ "${VERSION}" == "latest" ]]; then
