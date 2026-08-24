@@ -99,12 +99,27 @@ if [ ! -d "${CHART_PATH}" ]; then
     exit 1
 fi
 
+# GIT_PROVIDER 是必填项：server 启动时强制校验，chart 也会在 upgrade 前 fail。
+# 升级场景下必须来自 env 文件——老的 env 文件没有这一项，需要用户补上。
+if [ -z "${GIT_PROVIDER:-}" ]; then
+    echo "   ✗ GIT_PROVIDER 未设置。请在 ai-factory.env 中添加 GIT_PROVIDER=github 或 GIT_PROVIDER=gitlab 后重试。" >&2
+    exit 1
+fi
+if [ "${GIT_PROVIDER}" != "github" ] && [ "${GIT_PROVIDER}" != "gitlab" ]; then
+    echo "   ✗ GIT_PROVIDER 必须是 github 或 gitlab，当前为 '${GIT_PROVIDER}'" >&2
+    exit 1
+fi
+
 HELM_ARGS=(
+    --set gitProvider="${GIT_PROVIDER}"
     --set github.token="${GITHUB_TOKEN}"
     --set webhook.secret="${WEBHOOK_SECRET}"
     --set openai.apiKey="${OPENAI_API_KEY}"
     --set openai.codexApiKey="${CODEX_API_KEY}"
 )
+
+[ -n "${GITLAB_API_BASE:-}" ] && HELM_ARGS+=(--set gitlab.apiBase="${GITLAB_API_BASE}")
+[ -n "${GITLAB_TOKEN:-}" ] && HELM_ARGS+=(--set gitlab.token="${GITLAB_TOKEN}")
 
 # 模型配置：env 文件有值则传给 helm，否则使用 chart 默认值
 [ -n "${OPENAI_BASE_URL:-}" ] && HELM_ARGS+=(--set openai.baseUrl="${OPENAI_BASE_URL}")
