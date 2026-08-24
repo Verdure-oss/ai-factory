@@ -137,6 +137,88 @@ func newGitHubReportTask() *taskpkg.FactoryTask {
 	}
 }
 
+func newGitLabReportTask() *taskpkg.FactoryTask {
+	return &taskpkg.FactoryTask{
+		Metadata: taskpkg.ObjectMeta{
+			Name:      "gitlab-group-project-4",
+			Namespace: "default",
+		},
+		Spec: taskpkg.FactoryTaskSpec{
+			Source: taskpkg.SourceSpec{
+				Provider:   taskpkg.ProviderGitLab,
+				Host:       "gitlab.example.test",
+				Repository: "group/project",
+			},
+			Trigger: taskpkg.TriggerSpec{
+				ID: "4",
+			},
+			Reporting: taskpkg.ReportingSpec{
+				Provider:  taskpkg.ProviderGitLab,
+				Mode:      "comment",
+				TargetURL: "https://gitlab.example.test/group/project/-/work_items/4",
+			},
+		},
+	}
+}
+
+func TestPostStartedCommentReportsGitHub(t *testing.T) {
+	server, _, comments := fakeGitHubAPI(t, nil)
+	defer server.Close()
+
+	t.Setenv("GITHUB_TOKEN", "fake-token")
+	t.Setenv("GITHUB_API_BASE", server.URL)
+	withReportEnabled(t, true)
+
+	var out bytes.Buffer
+	postStartedComment(&out, newGitHubReportTask())
+
+	if len(*comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(*comments))
+	}
+	if !strings.Contains((*comments)[0], "ai-factory started processing this issue.") {
+		t.Fatalf("comment = %q, want started message", (*comments)[0])
+	}
+}
+
+func TestPostStartedCommentReportsGitLabWorkItem(t *testing.T) {
+	server, rec := newFakeGitLabAPI(t)
+	defer server.Close()
+
+	t.Setenv("GITLAB_TOKEN", "fake-token")
+	t.Setenv("GITLAB_API_BASE", server.URL)
+	withReportEnabled(t, true)
+
+	var out bytes.Buffer
+	postStartedComment(&out, newGitLabReportTask())
+
+	if len(rec.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(rec.comments))
+	}
+	if !strings.Contains(rec.comments[0], "ai-factory started processing this issue.") {
+		t.Fatalf("comment = %q, want started message", rec.comments[0])
+	}
+}
+
+func TestReportTaskResultReportsGitLabWorkItem(t *testing.T) {
+	server, rec := newFakeGitLabAPI(t)
+	defer server.Close()
+
+	t.Setenv("GITLAB_TOKEN", "fake-token")
+	t.Setenv("GITLAB_API_BASE", server.URL)
+	withTaskExists(t, true)
+	withReportEnabled(t, true)
+
+	var out bytes.Buffer
+	reportTaskResult(&out, newGitLabReportTask(), taskpkg.PhaseSucceeded, "FactoryTask completed successfully")
+
+	if len(rec.comments) != 1 {
+		t.Fatalf("comments = %d, want 1; output = %q", len(rec.comments), out.String())
+	}
+	if !strings.Contains(rec.comments[0], "FactoryTask `default/gitlab-group-project-4` Succeeded") {
+		t.Fatalf("comment = %q, want succeeded report", rec.comments[0])
+	}
+}
+
 // withTaskExists overrides the taskExists seam for the duration of the test.
 func withTaskExists(t *testing.T, exists bool) {
 	t.Helper()
