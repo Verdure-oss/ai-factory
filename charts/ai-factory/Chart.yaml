@@ -2,8 +2,8 @@ apiVersion: v2
 name: ai-factory
 description: A Helm chart for ai-factory self-hosted service
 type: application
-version: 0.1.2
-appVersion: "0.1.2"
+version: 0.1.3
+appVersion: "0.1.3"
 keywords:
   - ai-factory
   - coding-agent

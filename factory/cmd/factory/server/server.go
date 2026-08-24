@@ -519,7 +519,11 @@ func webhookOptions(provider string) taskpkg.IssueWebhookOptions {
 		ReportingMode:        "comment",
 		Commands:             opts.ValidationCommands,
 		SmokeCommands:        opts.SmokeCommands,
-		TriggerActions:       []string{"labeled"},
+		// GitHub uses "opened" and GitLab uses "open" when an issue is
+		// created with labels already attached. GitLab label changes after
+		// creation are normalized from update to the internal "labeled"
+		// action by the webhook parser.
+		TriggerActions:       []string{"open", "opened", "labeled"},
 		RequiredLabels:       []string{"ai-factory-run", "ai-factory-smoke"},
 		RequireAllOf:         []string{"ai-factory"},
 		Repositories:         opts.Repositories,
