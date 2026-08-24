@@ -171,7 +171,7 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 		// is set unconditionally — the agent is already backward compatible and
 		// simply skips dump/load when the var is unset.
 		agentScript := fmt.Sprintf("export AI_FACTORY_SESSION_FILE=%s\n%s", shellQuote(CISessionFile),
-			runAgentScript(workDir, task.Spec.Work.Instructions, task.Spec.Agent.PromptRef, agentCommand))
+			runAgentScript(workDir, task.Spec.Work.Instructions, task.Spec.Agent.PromptRef, agentCommand, task.Spec.Work.Commands))
 		plan.Steps = append(plan.Steps, ExecutionStep{
 			Name:    "run coding agent",
 			Command: []string{"/bin/sh", "-lc", agentScript},
@@ -317,8 +317,28 @@ func pushChangeBranchScript(workDir, remoteName, branchName, targetBranch string
 	return fmt.Sprintf("cd %s && if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse %s)\" ]; then echo 'No change branch push needed'; else git -c http.version=HTTP/1.1 push --force -u %s %s; fi", shellQuote(workDir), shellQuote(targetBranch), shellQuote(remoteName), shellQuote(branchName))
 }
 
-func runAgentScript(workDir, instructions, promptRef, agentCommand string) string {
+func validationPolicy(commands []string) string {
+	configured := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if command = strings.TrimSpace(command); command != "" {
+			configured = append(configured, command)
+		}
+	}
+	if len(configured) == 0 {
+		return "No validation commands are configured for this FactoryTask. Do not invent or run repository-wide build/test commands such as \"go build ./...\", \"go test ./...\", or \"go vet\"; they may require unavailable network dependencies. Use only lightweight, non-network checks needed to make the edit, then finish and let external CI perform validation."
+	}
+	var b strings.Builder
+	b.WriteString("The controller will run only these configured validation commands after the agent step:\n")
+	for _, command := range configured {
+		fmt.Fprintf(&b, "- %s\n", command)
+	}
+	b.WriteString("Do not add other repository-wide build or test commands beyond this list.")
+	return strings.TrimSpace(b.String())
+}
+
+func runAgentScript(workDir, instructions, promptRef, agentCommand string, validationCommands []string) string {
 	encodedInstructions := base64.StdEncoding.EncodeToString([]byte(instructions))
+	encodedValidationPolicy := base64.StdEncoding.EncodeToString([]byte(validationPolicy(validationCommands)))
 	return fmt.Sprintf(`set -eu
 cd %s
 mkdir -p .ai-factory
@@ -341,7 +361,7 @@ Work in a plan-first, small-step style:
 - Prefer focused edits to one or two related files at a time.
 - Avoid broad repository scans unless the task truly requires them.
 - Keep generated shell scripts short and deterministic.
-- Run focused validation first, then the configured final validation command.
+- The controller owns validation; follow the Validation policy appended after the FactoryTask instructions and do not invent additional commands.
 - Changes made through Shell tools persist in the checkout. Once implementation and focused checks pass, stop exploring and return the required final response.
 - Generated scripts run with the repository root as the current directory but may be stored under /tmp. Use pwd or git rev-parse --show-toplevel, never dirname "$0", to locate the repository.
 - If the task is too large, implement the smallest useful slice and explain the remaining follow-up in comments or commit text.
@@ -359,6 +379,8 @@ Work in a plan-first, small-step style:
 
 EOF
 cat .ai-factory/task-instructions.md >> "$PROMPT_INPUT"
+printf %%s %s | base64 -d >> "$PROMPT_INPUT"
+printf '\n\n' >> "$PROMPT_INPUT"
 /bin/sh -lc %s < "$PROMPT_INPUT"`,
 		shellQuote(workDir),
 		shellQuote(encodedInstructions),
@@ -366,6 +388,7 @@ cat .ai-factory/task-instructions.md >> "$PROMPT_INPUT"
 		shellQuote(promptRef),
 		shellQuote(promptRef),
 		shellQuote(promptRef),
+		shellQuote(encodedValidationPolicy),
 		shellQuote(agentCommand),
 	)
 }
@@ -467,7 +490,7 @@ func BuildCIRepairScript(task *FactoryTask, repairInstructions string, opts CIRe
 	envSetup += "export GOTOOLCHAIN=local\n"
 	script := fmt.Sprintf("set -eu\n%s%s\n%s\n%s",
 		envSetup,
-		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand),
+		runAgentScript(workDir, repairInstructions, task.Spec.Agent.PromptRef, agentCommand, nil),
 		commitChangesStrictScript(workDir, commitMessage, authorName, authorEmail),
 		pushChangeBranchScript(workDir, remoteName, changeBranch, task.Spec.Source.BaseRef),
 	)
