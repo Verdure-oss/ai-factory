@@ -165,6 +165,16 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
     read -r -p "GitHub Token: " GITHUB_TOKEN
 fi
 
+# GIT_PROVIDER 是必填项：server 启动时强制校验，chart 也会在 install 前 fail。
+if [ -z "${GIT_PROVIDER:-}" ]; then
+    read -r -p "Git Provider (github/gitlab) [github]: " GIT_PROVIDER
+    GIT_PROVIDER="${GIT_PROVIDER:-github}"
+fi
+if [ "${GIT_PROVIDER}" != "github" ] && [ "${GIT_PROVIDER}" != "gitlab" ]; then
+    echo "   ✗ GIT_PROVIDER 必须是 github 或 gitlab，当前为 '${GIT_PROVIDER}'" >&2
+    exit 1
+fi
+
 if [ -z "${WEBHOOK_SECRET:-}" ]; then
     read -r -p "Webhook Secret: " WEBHOOK_SECRET
 fi
@@ -209,11 +219,13 @@ if [ ! -f "${ENV_FILE}" ]; then
 # ai-factory 配置文件 — 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 # 修改后运行 ./update-config.sh 即可热更新（无需重启 Pod）
 
+GIT_PROVIDER=${GIT_PROVIDER}
 GITHUB_TOKEN=${GITHUB_TOKEN}
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
 CODEX_API_KEY=${CODEX_API_KEY:-}
 GITLAB_TOKEN=${GITLAB_TOKEN:-}
+GITLAB_API_BASE=${GITLAB_API_BASE:-}
 OPENAI_BASE_URL=${OPENAI_BASE_URL}
 OPENAI_MODEL=${OPENAI_MODEL}
 OPENAI_TEMPERATURE=${OPENAI_TEMPERATURE:-}
@@ -263,6 +275,7 @@ echo "   使用 chart: ${CHART_PATH}"
 
 # 构建 helm 参数。与 scripts/upgrade.sh 保持相同的运行配置入口。
 HELM_ARGS=(
+    --set gitProvider="${GIT_PROVIDER}"
     --set github.token="${GITHUB_TOKEN}"
     --set webhook.secret="${WEBHOOK_SECRET}"
     --set openai.apiKey="${OPENAI_API_KEY}"
@@ -270,6 +283,7 @@ HELM_ARGS=(
     --set openai.model="${OPENAI_MODEL}"
 )
 
+[ -n "${GITLAB_API_BASE:-}" ] && HELM_ARGS+=(--set gitlab.apiBase="${GITLAB_API_BASE}")
 [ -n "${CODEX_API_KEY:-}" ] && HELM_ARGS+=(--set openai.codexApiKey="${CODEX_API_KEY}")
 [ -n "${GITLAB_TOKEN:-}" ] && HELM_ARGS+=(--set gitlab.token="${GITLAB_TOKEN}")
 [ -n "${OPENAI_TEMPERATURE:-}" ] && HELM_ARGS+=(--set openai.temperature="${OPENAI_TEMPERATURE}")

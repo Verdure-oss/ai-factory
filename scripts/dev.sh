@@ -32,6 +32,10 @@ export OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS="90"
 # GitHub 克隆代理（可通过外部环境变量覆盖）
 export AI_FACTORY_GIT_PROXY="${AI_FACTORY_GIT_PROXY:-https://ghproxy.net}"
 
+# 代码托管方（必填，server 启动时强制校验）。本地开发默认 github，
+# 调试 GitLab 时用 GIT_PROVIDER=gitlab ./scripts/dev.sh 覆盖。
+export GIT_PROVIDER="${GIT_PROVIDER:-github}"
+
 # 设置 Go 代理（国内加速）
 export GOPROXY=https://goproxy.cn,direct
 
@@ -40,7 +44,8 @@ echo ""
 echo "🚀 启动 ai-factory-server..."
 echo "   监听地址: :32519"
 echo "   命名空间: ai-factory"
-echo "   Webhook: http://$(hostname -I | awk '{print $1}'):32519/webhook/github"
+echo "   提供商:   ${GIT_PROVIDER}"
+echo "   Webhook: http://$(hostname -I | awk '{print $1}'):32519/webhook/${GIT_PROVIDER}"
 echo ""
 
 # 运行服务

@@ -510,6 +510,90 @@ func TestFactoryTaskFromGitHubIssueWebhookWithForkOwner(t *testing.T) {
 	}
 }
 
+// GitLab "update" event where ai-factory-run was just added to the label set.
+const gitlabLabeledPayload = `{
+  "object_kind": "issue",
+  "event_type": "issue",
+  "user": {"username": "yueli", "name": "Yue Li"},
+  "project": {
+    "path_with_namespace": "platform/ai/ai-factory",
+    "web_url": "https://gitlab.example.com/platform/ai/ai-factory",
+    "default_branch": "main",
+    "git_http_url": "https://gitlab.example.com/platform/ai/ai-factory.git"
+  },
+  "object_attributes": {
+    "iid": 7, "title": "Run agent task", "description": "Please validate.",
+    "url": "https://gitlab.example.com/platform/ai/ai-factory/-/issues/7",
+    "action": "update",
+    "labels": [{"title": "ai-factory"}, {"title": "ai-factory-run"}]
+  },
+  "changes": {
+    "labels": {
+      "previous": [{"title": "ai-factory"}],
+      "current": [{"title": "ai-factory"}, {"title": "ai-factory-run"}]
+    }
+  }
+}`
+
+// Same shape, but ai-factory-run was removed (cancellation).
+const gitlabUnlabeledPayload = `{
+  "object_kind": "issue",
+  "object_attributes": {
+    "iid": 7, "title": "Run agent task",
+    "url": "https://gitlab.example.com/platform/ai/ai-factory/-/issues/7",
+    "action": "update",
+    "labels": [{"title": "ai-factory"}]
+  },
+  "project": {"path_with_namespace": "platform/ai/ai-factory", "web_url": "https://gitlab.example.com/platform/ai/ai-factory", "default_branch": "main", "git_http_url": "https://gitlab.example.com/platform/ai/ai-factory.git"},
+  "user": {"username": "yueli"},
+  "changes": {
+    "labels": {
+      "previous": [{"title": "ai-factory"}, {"title": "ai-factory-run"}],
+      "current": [{"title": "ai-factory"}]
+    }
+  }
+}`
+
+func TestParseGitLabIssueWebhookLabeled(t *testing.T) {
+	event, err := ParseIssueWebhook([]byte(gitlabLabeledPayload), ProviderGitLab)
+	if err != nil {
+		t.Fatalf("ParseIssueWebhook() error = %v", err)
+	}
+	if event.Action != "labeled" {
+		t.Fatalf("Action = %q, want labeled", event.Action)
+	}
+	if event.TriggerLabel != "ai-factory-run" {
+		t.Fatalf("TriggerLabel = %q, want ai-factory-run", event.TriggerLabel)
+	}
+}
+
+func TestParseGitLabIssueWebhookUnlabeled(t *testing.T) {
+	event, err := ParseIssueWebhook([]byte(gitlabUnlabeledPayload), ProviderGitLab)
+	if err != nil {
+		t.Fatalf("ParseIssueWebhook() error = %v", err)
+	}
+	if event.Action != "unlabeled" {
+		t.Fatalf("Action = %q, want unlabeled", event.Action)
+	}
+	if event.TriggerLabel != "ai-factory-run" {
+		t.Fatalf("TriggerLabel = %q, want ai-factory-run", event.TriggerLabel)
+	}
+}
+
+func TestParseGitLabIssueWebhookOpenNoChanges(t *testing.T) {
+	// The existing gitlabIssuePayload has action "open" and no changes block.
+	event, err := ParseIssueWebhook([]byte(gitlabIssuePayload), ProviderGitLab)
+	if err != nil {
+		t.Fatalf("ParseIssueWebhook() error = %v", err)
+	}
+	if event.Action != "open" {
+		t.Fatalf("Action = %q, want open (fallback to object_attributes.action)", event.Action)
+	}
+	if event.TriggerLabel != "" {
+		t.Fatalf("TriggerLabel = %q, want empty", event.TriggerLabel)
+	}
+}
+
 func TestFactoryTaskName(t *testing.T) {
 	cases := []struct {
 		name       string

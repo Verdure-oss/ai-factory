@@ -82,6 +82,12 @@ fi
 [[ -z "${WEBHOOK_SECRET:-}" ]] && read -r -p "Webhook Secret: " WEBHOOK_SECRET
 [[ -z "${OPENAI_API_KEY:-}" ]] && read -r -p "OpenAI API Key: " OPENAI_API_KEY
 [[ -z "${CODEX_API_KEY:-}" ]] && read -r -p "Codex API Key (optional): " CODEX_API_KEY
+# GIT_PROVIDER 是必填项：server 启动时强制校验，chart 也会在 install 前 fail。
+if [[ -z "${GIT_PROVIDER:-}" ]]; then read -r -p "Git Provider (github/gitlab) [github]: " GIT_PROVIDER; GIT_PROVIDER="${GIT_PROVIDER:-github}"; fi
+if [[ "${GIT_PROVIDER}" != "github" && "${GIT_PROVIDER}" != "gitlab" ]]; then
+  echo "   ✗ GIT_PROVIDER 必须是 github 或 gitlab，当前为 '${GIT_PROVIDER}'" >&2
+  exit 1
+fi
 if [[ -z "${OPENAI_BASE_URL:-}" ]]; then read -r -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL; OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"; fi
 if [[ -z "${OPENAI_MODEL:-}" ]]; then read -r -p "OpenAI Model [gpt-4.1]: " OPENAI_MODEL; OPENAI_MODEL="${OPENAI_MODEL:-gpt-4.1}"; fi
 [[ -z "${AI_FACTORY_GIT_PROXY:-}" ]] && read -r -p "Git Proxy (optional): " AI_FACTORY_GIT_PROXY
@@ -91,6 +97,7 @@ if [[ -z "${OPENAI_MODEL:-}" ]]; then read -r -p "OpenAI Model [gpt-4.1]: " OPEN
 if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<EOF
 # ai-factory 配置 — 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
+GIT_PROVIDER=${GIT_PROVIDER}
 GITHUB_TOKEN=${GITHUB_TOKEN}
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -141,6 +148,7 @@ HELM_ARGS=(
   --set "server.image.tag=${VERSION}"
   --set "sandbox.image.repository=${IMAGE_PREFIX}/coding-agent-sandbox"
   --set "sandbox.image.tag=${VERSION}"
+  --set "gitProvider=${GIT_PROVIDER}"
   --set "github.token=${GITHUB_TOKEN}"
   --set "webhook.secret=${WEBHOOK_SECRET}"
   --set "openai.apiKey=${OPENAI_API_KEY}"
@@ -149,6 +157,7 @@ HELM_ARGS=(
 )
 [[ -n "${CODEX_API_KEY:-}" ]] && HELM_ARGS+=(--set "openai.codexApiKey=${CODEX_API_KEY}")
 [[ -n "${GITLAB_TOKEN:-}" ]] && HELM_ARGS+=(--set "gitlab.token=${GITLAB_TOKEN}")
+[[ -n "${GITLAB_API_BASE:-}" ]] && HELM_ARGS+=(--set "gitlab.apiBase=${GITLAB_API_BASE}")
 [[ -n "${OPENAI_TEMPERATURE:-}" ]] && HELM_ARGS+=(--set "openai.temperature=${OPENAI_TEMPERATURE}")
 [[ -n "${OPENAI_MAX_TOKENS:-}" ]] && HELM_ARGS+=(--set "openai.maxTokens=${OPENAI_MAX_TOKENS}")
 [[ -n "${OPENAI_MAX_TOOL_ROUNDS:-}" ]] && HELM_ARGS+=(--set "openai.maxToolRounds=${OPENAI_MAX_TOOL_ROUNDS}")

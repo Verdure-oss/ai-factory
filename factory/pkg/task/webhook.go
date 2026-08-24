@@ -356,6 +356,16 @@ type gitlabIssueWebhook struct {
 	Project          gitlabProject          `json:"project"`
 	ObjectAttributes gitlabObjectAttributes `json:"object_attributes"`
 	Labels           []gitlabLabel          `json:"labels"`
+	Changes          gitlabChanges          `json:"changes"`
+}
+
+type gitlabChanges struct {
+	Labels gitlabLabelChange `json:"labels"`
+}
+
+type gitlabLabelChange struct {
+	Previous []gitlabLabel `json:"previous"`
+	Current  []gitlabLabel `json:"current"`
 }
 
 type gitlabUser struct {
@@ -406,9 +416,25 @@ func parseGitLabIssueWebhook(payload []byte) (*IssueWebhookEvent, error) {
 	if cloneURL == "" {
 		cloneURL = raw.Project.HTTPURL
 	}
+	action := raw.ObjectAttributes.Action
+	triggerLabel := ""
+	// GitLab has no dedicated labeled/unlabeled action: label changes arrive
+	// as action "update" with changes.labels.{previous,current}. Normalize to
+	// GitHub's model so ShouldTriggerIssue and handleIssueCancel need no change.
+	if len(raw.Changes.Labels.Previous) > 0 || len(raw.Changes.Labels.Current) > 0 {
+		prev := labelTitleSet(raw.Changes.Labels.Previous)
+		curr := labelTitleSet(raw.Changes.Labels.Current)
+		if added := firstTriggerLabel(raw.Changes.Labels.Current, prev); added != "" {
+			action = "labeled"
+			triggerLabel = added
+		} else if removed := firstTriggerLabel(raw.Changes.Labels.Previous, curr); removed != "" {
+			action = "unlabeled"
+			triggerLabel = removed
+		}
+	}
 	return &IssueWebhookEvent{
 		Provider:       ProviderGitLab,
-		Action:         raw.ObjectAttributes.Action,
+		Action:         action,
 		IssueID:        strconv.Itoa(raw.ObjectAttributes.IID),
 		IssueNumber:    raw.ObjectAttributes.IID,
 		IssueTitle:     raw.ObjectAttributes.Title,
@@ -420,6 +446,7 @@ func parseGitLabIssueWebhook(payload []byte) (*IssueWebhookEvent, error) {
 		DefaultBranch:  raw.Project.DefaultBranch,
 		CloneURL:       cloneURL,
 		Labels:         gitlabLabels(raw),
+		TriggerLabel:   triggerLabel,
 	}, nil
 }
 
@@ -571,6 +598,35 @@ func gitlabLabels(raw gitlabIssueWebhook) []string {
 		}
 	}
 	return labels
+}
+
+// gitLabTriggerLabels are the labels whose add/remove ai-factory reacts to.
+// Must stay in sync with server.webhookOptions RequiredLabels.
+var gitLabTriggerLabels = []string{"ai-factory-run", "ai-factory-smoke"}
+
+func labelTitleSet(labels []gitlabLabel) map[string]bool {
+	set := make(map[string]bool, len(labels))
+	for _, l := range labels {
+		if t := strings.TrimSpace(l.Title); t != "" {
+			set[t] = true
+		}
+	}
+	return set
+}
+
+// firstTriggerLabel returns the first trigger label present in labels but
+// absent from the exclude set (i.e. newly added or newly removed).
+func firstTriggerLabel(labels []gitlabLabel, exclude map[string]bool) string {
+	for _, l := range labels {
+		t := strings.TrimSpace(l.Title)
+		if t == "" || exclude[t] {
+			continue
+		}
+		if matchesAny(t, gitLabTriggerLabels) {
+			return t
+		}
+	}
+	return ""
 }
 
 func hostFromURL(rawURL, fallback string) string {

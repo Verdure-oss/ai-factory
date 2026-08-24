@@ -69,6 +69,10 @@ and continuously reconciles FactoryTask resources.`,
 
 var opts Options
 
+// activeProvider is the single provider this server instance serves, set from
+// GIT_PROVIDER at startup.
+var activeProvider string
+
 func init() {
 	Cmd.Flags().StringVar(&opts.Addr, "addr", ":8080", "listen address for webhook server")
 	Cmd.Flags().StringVarP(&opts.Namespace, "namespace", "n", "default", "FactoryTask namespace")
@@ -94,9 +98,31 @@ func init() {
 	Cmd.Flags().DurationVar(&opts.CIWatchSettleInterval, "ci-watch-settle-interval", 60*time.Second, "quiet window to wait for late-registering check runs after an event (CI_WATCH_SETTLE_INTERVAL overrides)")
 }
 
+// resolveGitProvider reads the required GIT_PROVIDER config and validates it.
+// A server instance serves exactly one provider (GitHub on a public host,
+// GitLab on the internal network); there is no auto-detect fallback.
+func resolveGitProvider() (string, error) {
+	p := strings.ToLower(strings.TrimSpace(taskpkg.ReadConfig("GIT_PROVIDER")))
+	switch p {
+	case taskpkg.ProviderGitHub, taskpkg.ProviderGitLab:
+		return p, nil
+	case "":
+		return "", fmt.Errorf("GIT_PROVIDER is required (must be %q or %q)", taskpkg.ProviderGitHub, taskpkg.ProviderGitLab)
+	default:
+		return "", fmt.Errorf("GIT_PROVIDER %q is invalid (must be %q or %q)", p, taskpkg.ProviderGitHub, taskpkg.ProviderGitLab)
+	}
+}
+
 func runServer(cmd *cobra.Command, args []string) error {
 	// Webhook secret: CLI flag is stored in opts.WebhookSecret.
 	// If not set via flag, verifyWebhook() will read from file/env at request time.
+
+	provider, err := resolveGitProvider()
+	if err != nil {
+		return err
+	}
+	activeProvider = provider
+	fmt.Fprintf(cmd.ErrOrStderr(), "ai-factory server provider: %s\n", provider)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -144,16 +170,23 @@ func runServer(cmd *cobra.Command, args []string) error {
 }
 
 func startWebhookServer(ctx context.Context, cmd *cobra.Command) error {
+	// Only the endpoint for the provider this instance serves is mounted; the
+	// other provider's path stays unrouted (404) so a misdirected webhook is
+	// visible instead of silently half-processed.
 	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook/github", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Header.Get("X-GitHub-Event") {
-		case "check_suite", "check_run":
-			ciWebhookHandler(cmd)(w, r)
-		default:
-			issueWebhookHandler(cmd, taskpkg.ProviderGitHub)(w, r)
-		}
-	})
-	mux.HandleFunc("/webhook/gitlab", issueWebhookHandler(cmd, taskpkg.ProviderGitLab))
+	switch activeProvider {
+	case taskpkg.ProviderGitHub:
+		mux.HandleFunc("/webhook/github", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Header.Get("X-GitHub-Event") {
+			case "check_suite", "check_run":
+				ciWebhookHandler(cmd)(w, r)
+			default:
+				issueWebhookHandler(cmd, taskpkg.ProviderGitHub)(w, r)
+			}
+		})
+	case taskpkg.ProviderGitLab:
+		mux.HandleFunc("/webhook/gitlab", issueWebhookHandler(cmd, taskpkg.ProviderGitLab))
+	}
 	mux.HandleFunc("/healthz", healthHandler)
 
 	server := &http.Server{
@@ -407,15 +440,9 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 
 		// Set labels on first creation or after deleting terminal task
 		// No comment here — the controller posts it to avoid duplicates
-		if shouldSetLabels && provider == taskpkg.ProviderGitHub {
-			gh := NewGitHubClient()
-			if gh.HasToken() && task.Spec.Trigger.URL != "" {
-				repo := task.Spec.Source.Repository
-				issueNum := 0
-				fmt.Sscanf(task.Spec.Trigger.ID, "%d", &issueNum)
-				if repo != "" && issueNum > 0 {
-					_ = gh.SetTaskRunning(req.Context(), repo, issueNum)
-				}
+		if shouldSetLabels {
+			if r, repo, issueNum, ok := issueReporterFor(task); ok && task.Spec.Trigger.URL != "" {
+				_ = r.SetTaskRunning(req.Context(), repo, issueNum)
 			}
 		}
 
@@ -430,17 +457,11 @@ func issueWebhookHandler(cmd *cobra.Command, provider string) http.HandlerFunc {
 // SandboxClaim labels use dnsLabel(task.Metadata.Name), which is a no-op on
 // dnsName output, so the raw name is a valid label selector value.
 func handleIssueCancel(w http.ResponseWriter, cmd *cobra.Command, event *taskpkg.IssueWebhookEvent) {
-	// Cancellation is implemented for GitHub only. GitLab is excluded today
-	// because its parser never sets TriggerLabel, but guard explicitly so a
-	// future parser change cannot route other providers into this path.
-	if event.Provider != taskpkg.ProviderGitHub {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		fmt.Fprintf(w, `{"ignored":true,"reason":"cancellation is only supported for GitHub"}`+"\n")
-		fmt.Fprintf(cmd.ErrOrStderr(), "webhook: cancel ignored for %s issue #%d: provider not supported\n",
-			event.Provider, event.IssueNumber)
-		return
-	}
+	// Cancellation is provider-neutral: both parsers set TriggerLabel on an
+	// unlabeled event, and the label cleanup below goes through IssueReporter.
+	// The only gate is the phase check — a task that is not waiting (terminal,
+	// running, or already gone) is never touched, which is what keeps a
+	// completing task's own label removal from cancelling anything.
 	ns := opts.Namespace
 	if ns == "" {
 		ns = "default"
@@ -464,18 +485,25 @@ func handleIssueCancel(w http.ResponseWriter, cmd *cobra.Command, event *taskpkg
 		return
 	}
 
-	// Clean up GitHub labels and leave a record of the cancellation.
-	if event.Provider == taskpkg.ProviderGitHub {
-		gh := NewGitHubClient()
-		if gh.HasToken() {
-			_ = gh.SetTaskCancelled(context.Background(), event.Repository, event.IssueNumber, event.TriggerLabel)
+	// Clean up status labels and leave a record of the cancellation.
+	if r := newIssueReporter(event.Provider); r != nil && r.HasToken() {
+		if gl, ok := r.(*GitLabClient); ok {
+			gl.SetHostFromRepositoryURL(hostForCancel(event))
 		}
+		_ = r.SetTaskCancelled(context.Background(), event.Repository, event.IssueNumber, event.TriggerLabel)
 	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "webhook: %s issue #%d cancelled: FactoryTask %s/%s removed (label %s removed)\n",
 		event.Provider, event.IssueNumber, ns, name, event.TriggerLabel)
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"cancelled":true,"task":"%s","namespace":"%s"}`+"\n", name, ns)
+}
+
+// hostForCancel returns the host used to build a GitLab API base during
+// cancellation. The webhook event carries RepositoryHost parsed from the
+// project web_url.
+func hostForCancel(event *taskpkg.IssueWebhookEvent) string {
+	return event.RepositoryHost
 }
 
 func webhookOptions(provider string) taskpkg.IssueWebhookOptions {

@@ -132,8 +132,11 @@ github:
 
 # GitLab configuration
 gitlab:
-  # GitLab token (set via --set or in secret)
+  # GitLab token (set via --set or in secret). Required when gitProvider=gitlab.
   token: ""
+  # GitLab API base override (optional). Empty = derive https://<host>/api/v4
+  # from the issue/project host (self-hosted instances).
+  apiBase: ""
 
 # OpenAI configuration
 openai:
@@ -192,3 +195,10 @@ changeRequestEnabled: true
 
 # Enable reporting (issue comments)
 reportEnabled: true
+
+# Git provider this instance serves: "github" or "gitlab".
+# REQUIRED — the server refuses to start without GIT_PROVIDER, and the chart
+# fails at install/upgrade time if this is unset or not one of the two values.
+# One instance serves one provider: deploy GitHub on a public host and GitLab
+# on the internal network, separately.
+gitProvider: ""

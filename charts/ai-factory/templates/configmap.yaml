@@ -28,3 +28,13 @@ data:
   {{- if .Values.gitProxy }}
   AI_FACTORY_GIT_PROXY: {{ .Values.gitProxy | quote }}
   {{- end }}
+  {{- /* GIT_PROVIDER is required by the server at startup: it refuses to boot
+       without it. Fail at install/upgrade time instead of letting the Pod
+       crash-loop with an opaque error. */ -}}
+  {{- if not (has (.Values.gitProvider | toString) (list "github" "gitlab")) }}
+  {{- fail "gitProvider is required and must be \"github\" or \"gitlab\" (e.g. --set gitProvider=gitlab)" }}
+  {{- end }}
+  GIT_PROVIDER: {{ .Values.gitProvider | quote }}
+  {{- if .Values.gitlab.apiBase }}
+  GITLAB_API_BASE: {{ .Values.gitlab.apiBase | quote }}
+  {{- end }}
