@@ -489,9 +489,10 @@ try:
                 base64_fallback_tried = True
                 embedded = {url: download_to_data_url(url) for url in image_urls}
                 if any(embedded.values()):
+                    user_content = build_user_content(prompt, image_urls, embedded)
                     messages[1] = {
                         "role": "user",
-                        "content": build_user_content(prompt, image_urls, embedded),
+                        "content": user_content,
                     }
                     print(
                         "OpenAI-compatible request failed with image URLs; "
@@ -534,7 +535,24 @@ try:
             continue
 
         if content.strip() and finish_reason != "length":
-            script = content
+            try:
+                script = validate_shell_script(normalize_model_script(content))
+            except ScriptValidationError as exc:
+                invalid_provider_responses.append(
+                    (
+                        "tool-exploration",
+                        redact(
+                            "Invalid candidate script: %s\n%s" % (exc, content)
+                        ),
+                    )
+                )
+                print(
+                    "InvalidToolExplorationResponse: phase=tool-exploration; "
+                    f"{exc}; switching to phase=final-script",
+                    file=sys.stderr,
+                )
+            else:
+                break
             break
 
         invalid_provider_responses.append(
