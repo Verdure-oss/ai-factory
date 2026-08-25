@@ -34,9 +34,22 @@ class CompletionHandler(http.server.BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(length))
         self.server.requests.append(request)
         payload = self.server.responses.pop(0)
+        status = payload.pop("_status", 200)
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path != "/image.png":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b"fake-png-bytes"
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -135,7 +148,53 @@ class AgentIntegrationTest(unittest.TestCase):
         self.assertEqual(len(server.requests), 1)
         self.assertEqual(server.requests[0]["tool_choice"], "auto")
 
-    def test_prompt_image_urls_become_image_content_blocks(self):
+    def test_tool_text_response_is_replaced_by_final_script_request(self):
+        responses = [
+            completion("The fix is complete. Here's the summary."),
+            completion("printf 'final-script-success\\n'"),
+        ]
+        with completion_server(responses) as server:
+            completed = self.run_agent(server)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("final-script-success", completed.stdout)
+        self.assertEqual(len(server.requests), 2)
+        self.assertEqual(
+            [request["tool_choice"] for request in server.requests],
+            ["auto", "none"],
+        )
+
+    def test_image_fallback_is_used_by_repair_request(self):
+        with completion_server(
+            [
+                {"_status": 400, "error": "image URL rejected"},
+                completion("exit 1"),
+                completion("printf 'repair-image-success\\n'"),
+            ]
+        ) as server:
+            image_url = f"http://127.0.0.1:{server.server_port}/image.png"
+            completed = self.run_agent(
+                server,
+                prompt=f"Fix it.\\n\\n![screenshot]({image_url})",
+                OPENAI_MAX_REPAIR_ROUNDS="1",
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("repair-image-success", completed.stdout)
+        self.assertGreaterEqual(len(server.requests), 3)
+        for request in (server.requests[1], server.requests[2]):
+            content = request["messages"][1]["content"]
+            image_blocks = [
+                block for block in content if block["type"] == "image_url"
+            ]
+            self.assertEqual(len(image_blocks), 1)
+            self.assertTrue(
+                image_blocks[0]["image_url"]["url"].startswith(
+                    "data:image/png;base64,"
+                )
+            )
+
+
         prompt = (
             "Fix the login page.\n\n"
             '![screenshot](https://example.com/a.png)\n'
