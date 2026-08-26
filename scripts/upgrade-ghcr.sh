@@ -87,6 +87,10 @@ HELM_ARGS=(
   --set "openai.apiKey=${OPENAI_API_KEY}"
   --set "openai.codexApiKey=${CODEX_API_KEY}"
 )
+# Agent 运行模式：设置 agent.command（含 "codex" 时 webhook 自动置 delegated）。
+# 来自 ai-factory.env 的 AGENT_COMMAND；留空则沿用 chart 现值。
+[[ -n "${AGENT_COMMAND:-}" ]] && HELM_ARGS+=(--set "agent.command=${AGENT_COMMAND}")
+[[ -n "${CODEX_MODEL:-}" ]] && HELM_ARGS+=(--set "codex.model=${CODEX_MODEL}")
 [[ -n "${GITLAB_API_BASE:-}" ]] && HELM_ARGS+=(--set "gitlab.apiBase=${GITLAB_API_BASE}")
 [[ -n "${GITLAB_TOKEN:-}" ]] && HELM_ARGS+=(--set "gitlab.token=${GITLAB_TOKEN}")
 [[ -n "${OPENAI_BASE_URL:-}" ]] && HELM_ARGS+=(--set "openai.baseUrl=${OPENAI_BASE_URL}")
@@ -110,11 +114,36 @@ HELM_ARGS=(
 [[ -n "${CI_WATCH_MAX_TOOL_ROUNDS:-}" ]] && HELM_ARGS+=(--set "server.ciWatchMaxToolRounds=${CI_WATCH_MAX_TOOL_ROUNDS}")
 [[ -n "${CI_WATCH_LOG_SNIPPET_LINES:-}" ]] && HELM_ARGS+=(--set "server.ciWatchLogSnippetLines=${CI_WATCH_LOG_SNIPPET_LINES}")
 
-# shellcheck disable=SC2068
+# Codex delegated-mode assets (optional). Publish scripts/auth.json as the
+# codex-auth Secret and the in-repo issue-fix skill as a ConfigMap, then enable
+# the mounts. No-ops when the files are absent. The warm pool is recreated later
+# in this script (steps 5-6), so recycled pods pick up the new mounts.
+CODEX_AUTH_FILE=""
+for f in "${SCRIPT_DIR}/auth.json" "${SCRIPT_DIR}/codex/auth.json"; do
+  [[ -f "${f}" ]] && CODEX_AUTH_FILE="${f}" && break
+done
+SKILL_FILE="${SCRIPT_DIR}/../skills/issue-fix/SKILL.md"
+if [[ -n "${CODEX_AUTH_FILE}" ]]; then
+  kubectl create secret generic codex-auth --namespace "${NAMESPACE}" \
+    --from-file=auth.json="${CODEX_AUTH_FILE}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  HELM_ARGS+=(--set "codex.authSecretName=codex-auth")
+  echo "   ✓ codex-auth Secret (来自 ${CODEX_AUTH_FILE})"
+fi
+if [[ -f "${SKILL_FILE}" ]]; then
+  kubectl create configmap issue-fix-skill --namespace "${NAMESPACE}" \
+    --from-file=SKILL.md="${SKILL_FILE}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  HELM_ARGS+=(--set "codex.skillConfigMapName=issue-fix-skill")
+  echo "   ✓ issue-fix-skill ConfigMap"
+fi
+
+# HELM_ARGS 需带引号展开：agent.command 取值可能含空格（"ai-factory-agent codex"），
+# 不加引号会被词分割成多个参数传给 helm。
 helm upgrade --install ai-factory "${CHART_REF}" \
-  ${CHART_VERSION_ARGS[@]:-} \
+  "${CHART_VERSION_ARGS[@]}" \
   --namespace "${NAMESPACE}" --create-namespace \
-  ${HELM_ARGS[@]}
+  "${HELM_ARGS[@]}"
 echo "   ✓ Helm chart 已升级"
 
 # 3. 等待 server 就绪 + 强制重建（:latest/固定 tag 都可能被缓存，需 restart）

@@ -374,6 +374,35 @@ func executeTask(out io.Writer, task *taskpkg.FactoryTask, timeout time.Duration
 	}); err != nil {
 		return err
 	}
+
+	// Delegated mode: the agent already committed, pushed, and opened the PR/MR
+	// itself. The controller does not create a change request or watch CI; it
+	// only reads the PR URL the skill recorded and reports success.
+	if task.Spec.Agent.IsDelegated() {
+		resultURL := ""
+		if raw, rerr := kubectlOutput("exec", "-n", namespace, sandboxName, "-c", output.Plan.ContainerName, "--", "/bin/sh", "-lc", "cat /workspace/repo/.ai-factory/result-url.txt 2>/dev/null || true"); rerr == nil {
+			resultURL = strings.TrimSpace(raw)
+		}
+		changedFiles := collectChangedFiles(namespace, sandboxName, output.Plan.ContainerName)
+		message := "Delegated agent completed (no PR URL reported)"
+		if resultURL != "" {
+			message = changeRequestReportMessage(task, resultURL, false, changedFiles)
+		}
+		if err := patchTaskStatus(namespace, task.Metadata.Name, taskpkg.StatusPatchOptions{
+			Phase:            taskpkg.PhaseSucceeded,
+			Reason:           "DelegatedAgentCompleted",
+			Message:          "Delegated agent completed",
+			SandboxClaimName: claim,
+			SandboxName:      sandboxName,
+			LastResultURL:    resultURL,
+		}); err != nil {
+			return err
+		}
+		reportTaskResult(out, task, taskpkg.PhaseSucceeded, message)
+		fmt.Fprintln(out, "PASS")
+		return nil
+	}
+
 	resultMessage := "FactoryTask completed successfully"
 	resultURL, changeRequestAlreadyExists, err := createTaskChangeRequest(task)
 	if err != nil {

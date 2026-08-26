@@ -90,4 +90,34 @@ env -i \
   OPENAI_API_KEY=check-runtime-placeholder \
   bash "${RUNTIME_LAUNCHER}" openai-compatible --check-config \
   || { echo "check-runtime: --check-config failed for default configuration" >&2; exit 1; }
+
+# Codex delegated dispatch: with a stub `codex` on PATH, verify the launcher
+# builds `codex exec --dangerously-bypass-approvals-and-sandbox [--model X] "<prompt>"`
+# with the prompt as the last positional argument.
+CODEX_TEST_DIR="$(mktemp -d)"
+trap 'rm -rf "${CODEX_TEST_DIR}"' EXIT
+cat > "${CODEX_TEST_DIR}/codex" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "${CODEX_TEST_DIR}/args.txt"
+printf '%s' "\${!#}" > "${CODEX_TEST_DIR}/last_arg.txt"
+STUB
+chmod +x "${CODEX_TEST_DIR}/codex"
+printf 'TASK-INSTRUCTIONS-MARKER\n' | \
+  PATH="${CODEX_TEST_DIR}:${PATH}" \
+  AI_FACTORY_SKILL_FILE="${CODEX_TEST_DIR}/nonexistent-skill.md" \
+  AI_FACTORY_WORKDIR="${CODEX_TEST_DIR}" \
+  CODEX_MODEL=check-runtime-model \
+  bash "${RUNTIME_LAUNCHER}" codex \
+  || { echo "check-runtime: codex dispatch exited non-zero" >&2; exit 1; }
+CODEX_ARGS="$(cat "${CODEX_TEST_DIR}/args.txt")"
+grep -Fxq 'exec' "${CODEX_TEST_DIR}/args.txt" \
+  || { echo "check-runtime: codex args missing 'exec': ${CODEX_ARGS}" >&2; exit 1; }
+grep -Fxq -- '--dangerously-bypass-approvals-and-sandbox' "${CODEX_TEST_DIR}/args.txt" \
+  || { echo "check-runtime: codex args missing bypass flag: ${CODEX_ARGS}" >&2; exit 1; }
+grep -Fxq -- '--model' "${CODEX_TEST_DIR}/args.txt" \
+  || { echo "check-runtime: codex args missing --model: ${CODEX_ARGS}" >&2; exit 1; }
+grep -Fxq 'check-runtime-model' "${CODEX_TEST_DIR}/args.txt" \
+  || { echo "check-runtime: codex args missing model value: ${CODEX_ARGS}" >&2; exit 1; }
+grep -Fq 'TASK-INSTRUCTIONS-MARKER' "${CODEX_TEST_DIR}/last_arg.txt" \
+  || { echo "check-runtime: codex prompt not passed as last argument" >&2; exit 1; }
 echo "coding-agent runtime checks passed"

@@ -40,7 +40,7 @@ type IssueWebhookOptions struct {
 	Namespace                 string
 	AgentName                 string
 	AgentCommand              string
-	SmokeAgentCommand         string   // agent command for smoke mode (ai-factory-smoke label)
+	SmokeAgentCommand         string // agent command for smoke mode (ai-factory-smoke label)
 	AgentEnv                  []string
 	PromptRef                 string
 	SandboxTemplateRef        string
@@ -130,6 +130,14 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 		commands = opts.SmokeCommands
 	}
 
+	// Delegated mode: when the agent command runs Codex, the agent owns the full
+	// workflow (edit/local CI/commit/push/PR) and the controller must not run its
+	// own change-request/CI steps. Smoke mode is always scripted (no-op agent).
+	agentWorkflow := ""
+	if !isSmoke && strings.Contains(strings.ToLower(agentCommand), "codex") {
+		agentWorkflow = AgentWorkflowDelegated
+	}
+
 	task := &FactoryTask{
 		APIVersion: APIVersion,
 		Kind:       Kind,
@@ -159,6 +167,7 @@ func FactoryTaskFromIssueWebhook(payload []byte, opts IssueWebhookOptions) (*Fac
 				Name:      agentName,
 				PromptRef: opts.PromptRef,
 				Command:   agentCommand,
+				Workflow:  agentWorkflow,
 				Env:       agentEnv,
 			},
 			Sandbox: SandboxSpec{

@@ -104,6 +104,11 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<EOF
 # ai-factory 配置 — 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 GIT_PROVIDER=${GIT_PROVIDER}
+# 切换 agent 运行模式：留空=默认 openai-compatible；设为 "ai-factory-agent codex"
+# 可启用 Codex 委托模式（需 scripts/auth.json）。含 codex 时自动走 delegated。
+AGENT_COMMAND=${AGENT_COMMAND:-}
+# 可选：Codex 模型覆盖（留空=用 auth.json/config.toml 的默认模型）
+CODEX_MODEL=${CODEX_MODEL:-}
 GITHUB_TOKEN=${GITHUB_TOKEN}
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -162,6 +167,9 @@ HELM_ARGS=(
   --set "openai.model=${OPENAI_MODEL}"
 )
 [[ -n "${CODEX_API_KEY:-}" ]] && HELM_ARGS+=(--set "openai.codexApiKey=${CODEX_API_KEY}")
+# Agent 运行模式：设置 agent.command（含 "codex" 时 webhook 自动置 delegated）。
+[[ -n "${AGENT_COMMAND:-}" ]] && HELM_ARGS+=(--set "agent.command=${AGENT_COMMAND}")
+[[ -n "${CODEX_MODEL:-}" ]] && HELM_ARGS+=(--set "codex.model=${CODEX_MODEL}")
 [[ -n "${GITLAB_TOKEN:-}" ]] && HELM_ARGS+=(--set "gitlab.token=${GITLAB_TOKEN}")
 [[ -n "${GITLAB_API_BASE:-}" ]] && HELM_ARGS+=(--set "gitlab.apiBase=${GITLAB_API_BASE}")
 [[ -n "${OPENAI_TEMPERATURE:-}" ]] && HELM_ARGS+=(--set "openai.temperature=${OPENAI_TEMPERATURE}")
@@ -188,11 +196,45 @@ if [[ -n "${GITHUB_REPOSITORY_ALLOWLIST:-}" ]]; then
   for repo in "${REPOS[@]}"; do repo="$(echo "${repo}" | xargs)"; [[ -n "${repo}" ]] && HELM_ARGS+=(--set "github.repositoryAllowList[${idx}]=${repo}"); idx=$((idx+1)); done
 fi
 
-# shellcheck disable=SC2068
+# Codex delegated-mode assets (optional). If scripts/auth.json (the output of
+# `codex login`, or an API-key auth.json) is present, publish it as the
+# codex-auth Secret and enable the mount. Likewise publish the in-repo issue-fix
+# skill as a ConfigMap so it can be edited without rebuilding the image. Both are
+# no-ops when the files are absent. The namespace is created first because helm's
+# --create-namespace only runs at chart install time.
+CODEX_AUTH_FILE=""
+for f in "${SCRIPT_DIR}/auth.json" "${SCRIPT_DIR}/codex/auth.json"; do
+  [[ -f "${f}" ]] && CODEX_AUTH_FILE="${f}" && break
+done
+SKILL_FILE="${SCRIPT_DIR}/../skills/issue-fix/SKILL.md"
+if [[ -n "${CODEX_AUTH_FILE}" || -f "${SKILL_FILE}" ]]; then
+  echo ""
+  echo "3.1 配置 Codex 委托模式资源..."
+  kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
+fi
+if [[ -n "${CODEX_AUTH_FILE}" ]]; then
+  kubectl create secret generic codex-auth --namespace "${NAMESPACE}" \
+    --from-file=auth.json="${CODEX_AUTH_FILE}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  HELM_ARGS+=(--set "codex.authSecretName=codex-auth")
+  echo "   ✓ codex-auth Secret (来自 ${CODEX_AUTH_FILE})"
+else
+  echo "   (未发现 scripts/auth.json，跳过 Codex 认证挂载)" 2>/dev/null || true
+fi
+if [[ -f "${SKILL_FILE}" ]]; then
+  kubectl create configmap issue-fix-skill --namespace "${NAMESPACE}" \
+    --from-file=SKILL.md="${SKILL_FILE}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  HELM_ARGS+=(--set "codex.skillConfigMapName=issue-fix-skill")
+  echo "   ✓ issue-fix-skill ConfigMap"
+fi
+
+# HELM_ARGS 需带引号展开：agent.command 等取值可能含空格（如
+# "ai-factory-agent codex"），不加引号会被词分割成多个参数传给 helm。
 helm upgrade --install ai-factory "${CHART_REF}" \
-  ${CHART_VERSION_ARGS[@]:-} \
+  "${CHART_VERSION_ARGS[@]}" \
   --namespace "${NAMESPACE}" --create-namespace \
-  ${HELM_ARGS[@]}
+  "${HELM_ARGS[@]}"
 
 # 4. 等待就绪
 echo ""

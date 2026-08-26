@@ -61,6 +61,46 @@ func TestFactoryTaskFromGitHubIssueWebhook(t *testing.T) {
 	if len(task.Spec.Work.Commands) != 1 || task.Spec.Work.Commands[0] != "go test ./..." {
 		t.Fatalf("commands = %#v", task.Spec.Work.Commands)
 	}
+	if task.Spec.Agent.Workflow != "" {
+		t.Fatalf("agent.workflow = %q, want empty (scripted) for non-codex command", task.Spec.Agent.Workflow)
+	}
+	if task.Spec.Agent.IsDelegated() {
+		t.Fatalf("agent.IsDelegated() = true, want false for non-codex command")
+	}
+}
+
+func TestFactoryTaskFromIssueWebhookWorkflowMode(t *testing.T) {
+	cases := []struct {
+		name         string
+		agentCommand string
+		wantWorkflow string
+	}{
+		{"codex delegated", "ai-factory-agent codex", AgentWorkflowDelegated},
+		{"codex exec delegated", "codex exec --full-auto", AgentWorkflowDelegated},
+		{"openai scripted", "ai-factory-agent openai-compatible", ""},
+		{"empty command scripted", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task, err := FactoryTaskFromIssueWebhook([]byte(githubIssuePayload), IssueWebhookOptions{
+				Provider:           ProviderGitHub,
+				AgentName:          "builder",
+				SandboxTemplateRef: "go-dev",
+				AgentCommand:       tc.agentCommand,
+				RequiredLabels:     []string{"ai-factory"},
+			})
+			if err != nil {
+				t.Fatalf("FactoryTaskFromIssueWebhook() error = %v", err)
+			}
+			if task.Spec.Agent.Workflow != tc.wantWorkflow {
+				t.Fatalf("agent.workflow = %q, want %q", task.Spec.Agent.Workflow, tc.wantWorkflow)
+			}
+			wantDelegated := tc.wantWorkflow == AgentWorkflowDelegated
+			if task.Spec.Agent.IsDelegated() != wantDelegated {
+				t.Fatalf("agent.IsDelegated() = %v, want %v", task.Spec.Agent.IsDelegated(), wantDelegated)
+			}
+		})
+	}
 }
 
 func TestFactoryTaskFromGitHubIssueWebhookWithChangeRequest(t *testing.T) {

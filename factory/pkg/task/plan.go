@@ -135,6 +135,33 @@ func BuildExecutionPlan(task *FactoryTask) (*ExecutionPlan, error) {
 		})
 	}
 
+	// Delegated mode: the agent (e.g. Codex + skill) owns the full workflow —
+	// edit, run checks locally, commit, push, and open the PR/MR itself. The
+	// controller only prepares git auth + a clean checkout and launches the
+	// agent with task context; it runs no validation/commit/push steps and does
+	// not create a change request or watch CI afterwards.
+	if task.Spec.Agent.IsDelegated() {
+		host, err := cloneHost(cloneURL)
+		if err != nil {
+			return nil, err
+		}
+		plan.Steps = append([]ExecutionStep{
+			{
+				Name:    "configure git credentials",
+				Command: []string{"/bin/sh", "-lc", configureGitCredentialsScript(host, authTokenEnv, authUsername)},
+			},
+			{
+				Name:    "configure git proxy",
+				Command: []string{"/bin/sh", "-lc", configureGitProxyScript()},
+			},
+		}, plan.Steps...)
+		plan.Steps = append(plan.Steps, ExecutionStep{
+			Name:    "run coding agent (delegated)",
+			Command: []string{"/bin/sh", "-lc", delegatedAgentScript(workDir, task, changeBranch, targetBranch, remoteName, agentCommand)},
+		})
+		return plan, nil
+	}
+
 	if task.Spec.ChangeRequest.Enabled {
 		host, err := cloneHost(cloneURL)
 		if err != nil {
@@ -389,6 +416,61 @@ printf '\n\n' >> "$PROMPT_INPUT"
 		shellQuote(promptRef),
 		shellQuote(promptRef),
 		shellQuote(encodedValidationPolicy),
+		shellQuote(agentCommand),
+	)
+}
+
+// delegatedAgentScript prepares the prompt and task-context environment for a
+// delegated-mode agent (Codex + skill), then pipes the FactoryTask instructions
+// to the agent command on stdin. Unlike runAgentScript it appends no "controller
+// owns validation" / "do not commit" guidance: the workflow lives entirely in
+// the agent's skill, which reads these AI_FACTORY_* context variables.
+func delegatedAgentScript(workDir string, task *FactoryTask, changeBranch, targetBranch, remoteName, agentCommand string) string {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	promptRef := task.Spec.Agent.PromptRef
+	return fmt.Sprintf(`set -eu
+cd %s
+mkdir -p .ai-factory
+grep -qxF '.ai-factory/' .git/info/exclude 2>/dev/null || echo '.ai-factory/' >> .git/info/exclude 2>/dev/null || true
+printf %%s %s | base64 -d > .ai-factory/task-instructions.md
+export AI_FACTORY_REPO=%s
+export AI_FACTORY_PROVIDER=%s
+export AI_FACTORY_BASE_REF=%s
+export AI_FACTORY_BRANCH=%s
+export AI_FACTORY_TARGET_BRANCH=%s
+export AI_FACTORY_REMOTE=%s
+export AI_FACTORY_ISSUE_URL=%s
+export AI_FACTORY_WORKDIR=%s
+AI_FACTORY_PR_TITLE=$(printf %%s %s | base64 -d); export AI_FACTORY_PR_TITLE
+AI_FACTORY_PR_BODY=$(printf %%s %s | base64 -d); export AI_FACTORY_PR_BODY
+PROMPT_INPUT=.ai-factory/agent-prompt.md
+: > "$PROMPT_INPUT"
+if [ -n %s ]; then
+  if [ ! -f %s ]; then
+    printf 'agent promptRef not found: %%s\n' %s >&2
+    exit 1
+  fi
+  cat %s >> "$PROMPT_INPUT"
+  printf '\n\n' >> "$PROMPT_INPUT"
+fi
+cat .ai-factory/task-instructions.md >> "$PROMPT_INPUT"
+/bin/sh -lc %s < "$PROMPT_INPUT"`,
+		shellQuote(workDir),
+		shellQuote(enc(task.Spec.Work.Instructions)),
+		shellQuote(task.Spec.Source.Repository),
+		shellQuote(task.Spec.Source.Provider),
+		shellQuote(task.Spec.Source.BaseRef),
+		shellQuote(changeBranch),
+		shellQuote(targetBranch),
+		shellQuote(remoteName),
+		shellQuote(task.Spec.Trigger.URL),
+		shellQuote(workDir),
+		shellQuote(enc(task.Spec.ChangeRequest.Title)),
+		shellQuote(enc(task.Spec.ChangeRequest.Body)),
+		shellQuote(promptRef),
+		shellQuote(promptRef),
+		shellQuote(promptRef),
+		shellQuote(promptRef),
 		shellQuote(agentCommand),
 	)
 }

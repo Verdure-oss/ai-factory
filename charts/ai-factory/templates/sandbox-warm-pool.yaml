@@ -27,6 +27,36 @@ spec:
         - -lc
         - mkdir -p /workspace && sleep 3600
         workingDir: /workspace
+        {{- if or .Values.codex.authSecretName .Values.codex.skillConfigMapName }}
+        volumeMounts:
+        {{- if .Values.codex.authSecretName }}
+        # Codex auth.json (from `codex login`) for delegated mode.
+        - name: codex-auth
+          mountPath: /home/agent/.codex/auth.json
+          subPath: auth.json
+          readOnly: true
+        {{- end }}
+        {{- if .Values.codex.skillConfigMapName }}
+        # Externally editable issue-fix workflow skill (override without rebuild).
+        - name: issue-fix-skill
+          mountPath: /opt/ai-factory/skills/issue-fix/SKILL.md
+          subPath: SKILL.md
+          readOnly: true
+        {{- end }}
+        {{- end }}
+      {{- if or .Values.codex.authSecretName .Values.codex.skillConfigMapName }}
+      volumes:
+      {{- if .Values.codex.authSecretName }}
+      - name: codex-auth
+        secret:
+          secretName: {{ .Values.codex.authSecretName }}
+      {{- end }}
+      {{- if .Values.codex.skillConfigMapName }}
+      - name: issue-fix-skill
+        configMap:
+          name: {{ .Values.codex.skillConfigMapName }}
+      {{- end }}
+      {{- end }}
 ---
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool

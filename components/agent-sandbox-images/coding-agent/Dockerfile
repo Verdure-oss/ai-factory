@@ -15,7 +15,12 @@
 FROM node:22-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG INSTALL_CODEX_CLI=false
+# Codex delegated mode needs the Codex CLI pre-installed in the shared image
+# (warm-pool pods are reused across both agent modes), so this defaults to true.
+ARG INSTALL_CODEX_CLI=true
+# GitLab CLI release version (glab). GitHub CLI (gh) is installed from its
+# official apt repository and needs no pinned version here.
+ARG GLAB_VERSION=1.65.0
 # Sandbox Go toolchain. Keep this >= the highest `go` directive any target
 # repo requires: the sandbox is offline, so `go` commands must never try to
 # auto-download a newer toolchain (proxy.golang.org is unreachable). Bump when
@@ -25,6 +30,7 @@ ARG GO_VERSION=1.25.12
 
 ENV HOME=/home/agent \
     WORKSPACE=/workspace \
+    CODEX_HOME=/home/agent/.codex \
     PATH=/usr/local/go/bin:$PATH \
     PYTHONPATH="/usr/local/bin" \
     npm_config_update_notifier=false \
@@ -70,6 +76,31 @@ RUN if [ "${INSTALL_CODEX_CLI}" = "true" ]; then \
     fi \
     && npm cache clean --force
 
+# GitHub CLI (gh) from the official apt repo + GitLab CLI (glab) release binary.
+# The delegated Codex workflow uses these to open PRs/MRs. Each `--version`
+# check fails the build loudly if an install URL or version is wrong.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version \
+    && glab_arch="$(dpkg --print-architecture)" \
+    && case "${glab_arch}" in \
+        amd64) glab_arch=amd64 ;; \
+        arm64) glab_arch=arm64 ;; \
+        *) echo "unsupported glab architecture: ${glab_arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz" -o /tmp/glab.tgz \
+    && tar -C /tmp -xzf /tmp/glab.tgz \
+    && install -m 0755 /tmp/bin/glab /usr/local/bin/glab \
+    && rm -rf /tmp/glab.tgz /tmp/bin \
+    && glab --version
+
 COPY ai-factory-agent /usr/local/bin/ai-factory-agent
 COPY ai-factory-agent.py /usr/local/bin/ai-factory-agent.py
 COPY agent_budget.py /usr/local/bin/agent_budget.py
@@ -93,7 +124,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/ai-factory-agent \
 
 RUN chmod 755 /usr/local/bin/ai-factory-agent /usr/local/bin/ai-factory-agent.py /usr/local/bin/agent_budget.py /usr/local/bin/agent_config.py /usr/local/bin/agent_images.py /usr/local/bin/agent_session.py /usr/local/bin/repair_loop.py /usr/local/bin/script_validation.py /usr/local/bin/ai-factory-sandbox-entrypoint \
     && useradd --create-home --home-dir "${HOME}" --shell /bin/bash agent \
-    && mkdir -p "${WORKSPACE}" \
+    && mkdir -p "${WORKSPACE}" "${CODEX_HOME}" /opt/ai-factory/skills \
     && chown -R agent:agent "${HOME}" "${WORKSPACE}"
 
 USER agent
