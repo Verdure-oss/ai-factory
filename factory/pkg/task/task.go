@@ -82,12 +82,31 @@ type TriggerSpec struct {
 	Actor string `yaml:"actor,omitempty"`
 }
 
+// Agent workflow modes select how much of the end-to-end flow the agent owns.
+const (
+	// AgentWorkflowScripted (default, also the zero value "") keeps the current
+	// behavior: the agent produces a shell script and the controller performs
+	// git commit/push, change-request creation, and CI repair.
+	AgentWorkflowScripted = "scripted"
+	// AgentWorkflowDelegated hands the full workflow to the agent (e.g. Codex +
+	// skill): edit, run checks locally, commit, push, and open the PR/MR itself.
+	// The controller becomes a thin launcher and only reports the result.
+	AgentWorkflowDelegated = "delegated"
+)
+
 // AgentSpec selects the agent persona and optional prompt/config reference.
 type AgentSpec struct {
 	Name      string   `yaml:"name"`
 	PromptRef string   `yaml:"promptRef,omitempty"`
 	Command   string   `yaml:"command,omitempty"`
+	Workflow  string   `yaml:"workflow,omitempty"`
 	Env       []string `yaml:"env,omitempty"`
+}
+
+// IsDelegated reports whether the agent owns the full workflow (git/PR/CI),
+// so the controller must skip its own change-request and CI-repair steps.
+func (s AgentSpec) IsDelegated() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Workflow), AgentWorkflowDelegated)
 }
 
 // SandboxSpec describes the sandbox that should execute the task.
@@ -194,6 +213,11 @@ func (s FactoryTaskSpec) validate() []error {
 			errs = append(errs, errors.New("spec.agent.env entries must be valid shell environment variable names"))
 			break
 		}
+	}
+	switch strings.TrimSpace(s.Agent.Workflow) {
+	case "", AgentWorkflowScripted, AgentWorkflowDelegated:
+	default:
+		errs = append(errs, fmt.Errorf("spec.agent.workflow must be %q or %q", AgentWorkflowScripted, AgentWorkflowDelegated))
 	}
 	if strings.TrimSpace(s.Sandbox.TemplateRef) == "" {
 		errs = append(errs, errors.New("spec.sandbox.templateRef is required"))

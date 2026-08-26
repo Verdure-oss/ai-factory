@@ -22,21 +22,39 @@ export PATH="/usr/local/go/bin:${PATH:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_AGENT="${SCRIPT_DIR}/ai-factory-agent.py"
 
+# Codex delegated mode: the workflow "skill" is loaded from outside the image
+# (K8s ConfigMap mount) with an in-image default as fallback. Overridable.
+CODEX_SKILL_FILE="${AI_FACTORY_SKILL_FILE:-/opt/ai-factory/skills/issue-fix/SKILL.md}"
+CODEX_WORKDIR="${AI_FACTORY_WORKDIR:-/workspace/repo}"
+
 usage() {
     cat >&2 <<'EOF'
 Usage:
   ai-factory-agent openai-compatible [--check-config]
-  ai-factory-agent codex [args...]
+  ai-factory-agent codex [extra codex args...]
   ai-factory-agent --help
 
 OpenAI-compatible mode reads the FactoryTask prompt from stdin and executes a
 model-generated shell script in the current repository.
 
+Codex (delegated) mode reads the FactoryTask prompt from stdin and runs the
+pre-installed Codex CLI (`codex exec`) in the repository checkout. Codex follows
+an externally loaded workflow skill (default
+/opt/ai-factory/skills/issue-fix/SKILL.md) to fix the issue, run checks locally,
+commit, push, and open a PR/MR itself. It prints a final
+`__AI_FACTORY_RESULT__={...}` line the controller reads for the PR URL.
+
   --check-config   Validate the OpenAI-compatible configuration offline and
                    exit without reading a prompt or making a network request.
 
 Required environment:
-  OPENAI_API_KEY
+  OPENAI_API_KEY   (openai-compatible mode)
+
+Codex mode environment:
+  CODEX_HOME               default: /home/agent/.codex (holds auth.json/config.toml)
+  CODEX_MODEL              optional model override passed as `codex exec --model`
+  AI_FACTORY_SKILL_FILE    default: /opt/ai-factory/skills/issue-fix/SKILL.md
+  AI_FACTORY_WORKDIR       default: /workspace/repo
 
 Optional environment:
   OPENAI_BASE_URL      default: https://api.openai.com/v1
@@ -77,6 +95,91 @@ run_openai_compatible() {
     AI_FACTORY_PROMPT_FILE="${prompt_file}" python3 "${PYTHON_AGENT}" "$@"
 }
 
+# Mask known secret values in Codex output before it reaches stdout/logs. Codex
+# is a general agent and may echo tokens; the controller captures this stream.
+redact_secrets() {
+    local sed_args=() name val esc
+    for name in OPENAI_API_KEY CODEX_API_KEY GITHUB_TOKEN GITLAB_TOKEN AI_FACTORY_GITHUB_TOKEN; do
+        val="${!name:-}"
+        if [[ -n "${val}" ]]; then
+            esc="$(printf '%s' "${val}" | sed -e 's/[&/\]/\\&/g')"
+            sed_args+=(-e "s/${esc}/<redacted:${name}>/g")
+        fi
+    done
+    if [[ ${#sed_args[@]} -eq 0 ]]; then
+        cat
+    else
+        sed -u "${sed_args[@]}" 2>/dev/null || sed "${sed_args[@]}"
+    fi
+}
+
+# Build the Codex prompt: point it at the workflow skill, note the injected
+# task-context env vars, then hand it the FactoryTask instructions verbatim.
+compose_codex_prompt() {
+    local task="$1" skill="$2"
+    if [[ -f "${skill}" ]]; then
+        printf 'Read and strictly follow the workflow skill at %s. It is the authoritative playbook for this task: fix the issue, run the relevant checks locally, commit, push, and open a PR/MR yourself, then print the required result line.\n\n' "${skill}"
+    else
+        echo "ai-factory: workflow skill ${skill} not found; proceeding with task instructions only" >&2
+    fi
+    printf 'Task context is available in these environment variables: AI_FACTORY_REPO, AI_FACTORY_BASE_REF, AI_FACTORY_BRANCH, AI_FACTORY_ISSUE_URL, AI_FACTORY_PR_TITLE, AI_FACTORY_PR_BODY, AI_FACTORY_REMOTE, AI_FACTORY_PROVIDER. Git auth (GITHUB_TOKEN/GITLAB_TOKEN) is already in the environment.\n\n'
+    printf 'When finished, print exactly one final line: __AI_FACTORY_RESULT__={"pr_url":"<url>","branch":"<branch>","summary":"<one sentence>"} and nothing after it.\n\n'
+    printf '%s\n' "${task}"
+}
+
+# Delegated mode: run the pre-installed Codex CLI against the checkout. The
+# workflow (edit -> local CI -> commit -> push -> open PR) lives in the skill,
+# not here; this function only prepares and launches the engine.
+run_codex() {
+    if ! command -v codex >/dev/null 2>&1; then
+        echo "codex CLI not found in sandbox image; delegated mode requires it" >&2
+        return 127
+    fi
+
+    local prompt_body
+    prompt_body="$(cat)"
+    if [[ -z "${prompt_body//[[:space:]]/}" ]]; then
+        echo "FactoryTask prompt on stdin is empty" >&2
+        return 2
+    fi
+
+    local full_prompt
+    full_prompt="$(compose_codex_prompt "${prompt_body}" "${CODEX_SKILL_FILE}")"
+
+    if [[ -d "${CODEX_WORKDIR}" ]]; then
+        cd "${CODEX_WORKDIR}"
+    else
+        echo "ai-factory: workdir ${CODEX_WORKDIR} not found; running codex in ${PWD}" >&2
+    fi
+
+    # Assemble `codex exec [--dangerously-bypass-approvals-and-sandbox] [--model X] <extra> "<prompt>"`.
+    # The pod is already isolated, so Codex's own sandbox/approval must be off or
+    # it cannot write files, use gh/glab, or reach the network.
+    local codex_args=() arg has_exec=false has_bypass=false
+    for arg in "$@"; do
+        [[ "${arg}" == "exec" ]] && has_exec=true
+        [[ "${arg}" == "--dangerously-bypass-approvals-and-sandbox" ]] && has_bypass=true
+    done
+    if [[ "${has_exec}" == "false" ]]; then
+        codex_args+=("exec")
+    fi
+    if [[ "${has_bypass}" == "false" ]]; then
+        codex_args+=("--dangerously-bypass-approvals-and-sandbox")
+    fi
+    if [[ -n "${CODEX_MODEL:-}" ]]; then
+        codex_args+=("--model" "${CODEX_MODEL}")
+    fi
+    codex_args+=("$@")
+    codex_args+=("${full_prompt}")
+
+    # Stream output but mask secrets first; preserve codex's exit code.
+    set +e
+    codex "${codex_args[@]}" 2>&1 | redact_secrets
+    local status="${PIPESTATUS[0]}"
+    set -e
+    return "${status}"
+}
+
 case "${1:-}" in
     openai-compatible)
         shift
@@ -85,7 +188,8 @@ case "${1:-}" in
         ;;
     codex)
         shift
-        exec codex "$@"
+        run_codex "$@"
+        exit $?
         ;;
     -h|--help|help)
         usage

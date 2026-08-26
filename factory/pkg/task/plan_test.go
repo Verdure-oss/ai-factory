@@ -75,3 +75,68 @@ func TestBuildCIRepairScriptEnvInjection(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildExecutionPlanDelegated(t *testing.T) {
+	task := &FactoryTask{
+		APIVersion: APIVersion,
+		Kind:       Kind,
+		Metadata:   ObjectMeta{Name: "delegated-test"},
+		Spec: FactoryTaskSpec{
+			Source: SourceSpec{
+				Provider:   ProviderGitHub,
+				Repository: "org/repo",
+				BaseRef:    "main",
+				CloneURL:   "https://github.com/org/repo.git",
+			},
+			Trigger: TriggerSpec{URL: "https://github.com/org/repo/issues/7"},
+			Agent: AgentSpec{
+				Name:     "builder",
+				Command:  "ai-factory-agent codex",
+				Workflow: AgentWorkflowDelegated,
+			},
+			Sandbox:       SandboxSpec{TemplateRef: "go-dev"},
+			Work:          WorkSpec{Instructions: "fix the crash"},
+			ChangeRequest: ChangeRequestSpec{Enabled: true, Title: "Fix crash", Body: "Closes the crash"},
+		},
+	}
+
+	plan, err := BuildExecutionPlan(task)
+	if err != nil {
+		t.Fatalf("BuildExecutionPlan() error = %v", err)
+	}
+
+	var names []string
+	var delegatedScript string
+	for _, s := range plan.Steps {
+		names = append(names, s.Name)
+		if s.Name == "run coding agent (delegated)" {
+			delegatedScript = strings.Join(s.Command, " ")
+		}
+	}
+	joined := strings.Join(names, ",")
+
+	// Delegated mode must not run controller-side commit/push/validation steps.
+	for _, forbidden := range []string{"commit changes", "push change branch", "create change branch"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("delegated plan must not contain step %q; steps = %s", forbidden, joined)
+		}
+	}
+	if delegatedScript == "" {
+		t.Fatalf("delegated plan missing 'run coding agent (delegated)' step; steps = %s", joined)
+	}
+	// Git auth must still be prepared so the agent can push / use gh.
+	if !strings.Contains(joined, "configure git credentials") {
+		t.Errorf("delegated plan should still configure git credentials; steps = %s", joined)
+	}
+	// Context env + agent command must be injected into the delegated step.
+	for _, want := range []string{"export AI_FACTORY_REPO=", "export AI_FACTORY_BRANCH=", "AI_FACTORY_PR_TITLE", "ai-factory-agent codex"} {
+		if !strings.Contains(delegatedScript, want) {
+			t.Errorf("delegated agent script missing %q:\n%s", want, delegatedScript)
+		}
+	}
+	// The controller-owned "do not commit" guidance must NOT be injected in
+	// delegated mode — the skill owns the git workflow.
+	if strings.Contains(delegatedScript, "DO NOT run git commit") {
+		t.Errorf("delegated agent script must not inject scripted-mode git guidance:\n%s", delegatedScript)
+	}
+}

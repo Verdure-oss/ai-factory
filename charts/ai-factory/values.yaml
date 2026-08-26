@@ -90,6 +90,31 @@ sandbox:
   # Container name in sandbox
   containerName: dev
 
+# Codex delegated mode (optional). When the agent command runs Codex, the agent
+# owns the full workflow (edit/local-CI/commit/push/PR) driven by an editable
+# skill. Codex is pre-installed in the sandbox image; these wire in its auth and
+# the workflow skill. Both are empty by default (delegated mode off).
+codex:
+  # Name of a Secret holding Codex auth (`codex login` output). It must have a
+  # key `auth.json`; it is mounted read-only at /home/agent/.codex/auth.json.
+  # Create it with, e.g.:
+  #   kubectl -n <ns> create secret generic codex-auth \
+  #     --from-file=auth.json=$HOME/.codex/auth.json
+  authSecretName: ""
+
+  # Name of a ConfigMap holding the issue-fix workflow skill. Its `SKILL.md`
+  # key is mounted read-only at /opt/ai-factory/skills/issue-fix/SKILL.md, so
+  # you can adjust the workflow without rebuilding the image. Create it with:
+  #   kubectl -n <ns> create configmap issue-fix-skill \
+  #     --from-file=SKILL.md=skills/issue-fix/SKILL.md
+  skillConfigMapName: ""
+
+  # Optional model override for Codex delegated mode, passed as `codex exec
+  # --model`. Empty = use the default from auth.json / ~/.codex/config.toml
+  # (for a ChatGPT-account login this is Codex's built-in GPT-5-codex default;
+  # for a custom provider it is whatever config.toml sets).
+  model: ""
+
 # Agent configuration
 agent:
   # Agent name
@@ -104,7 +129,7 @@ agent:
   # Smoke commands (run in sandbox to verify environment and create marker file)
   # Mirrors FACTORY_SMOKE_COMMAND from .github/workflows/issue-factorytask.yaml
   smokeCommands:
-    - "mkdir -p .ai-factory/smoke && echo smoke-$(date +%s) > .ai-factory/smoke/placeholder.txt && test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent"
+    - "mkdir -p .ai-factory/smoke && echo smoke-$(date +%s) > .ai-factory/smoke/placeholder.txt && test -s /tmp/ai-factory-agent-prompt.txt && git --version && go version && node --version && python3 --version && command -v ai-factory-agent && command -v codex && command -v gh && command -v glab"
 
   # Validation commands for run mode
   # 留空则跳过验证，直接创建 PR

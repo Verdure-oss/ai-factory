@@ -92,6 +92,11 @@ spec:
                     type: string
                   command:
                     type: string
+                  workflow:
+                    type: string
+                    enum:
+                    - scripted
+                    - delegated
                   env:
                     type: array
                     items:

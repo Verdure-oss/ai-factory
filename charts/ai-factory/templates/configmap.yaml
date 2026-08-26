@@ -18,6 +18,11 @@ data:
   OPENAI_FINAL_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.finalRequestTimeoutSeconds | quote }}
   OPENAI_REPAIR_REQUEST_TIMEOUT_SECONDS: {{ .Values.openai.repairRequestTimeoutSeconds | quote }}
   OPENAI_VISION_ENABLED: {{ .Values.openai.visionEnabled | quote }}
+  {{- if .Values.codex.model }}
+  # Optional model override for Codex delegated mode (passed as `codex exec --model`).
+  # Leave codex.model empty to use the model from auth.json / ~/.codex/config.toml.
+  CODEX_MODEL: {{ .Values.codex.model | quote }}
+  {{- end }}
   MAX_CONCURRENT_TASKS: {{ .Values.server.maxConcurrentTasks | quote }}
   CI_WATCH_ENABLED: {{ .Values.server.ciWatchEnabled | quote }}
   CI_WATCH_MAX_RETRIES: {{ .Values.server.ciWatchMaxRetries | quote }}
