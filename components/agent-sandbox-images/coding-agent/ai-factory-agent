@@ -53,8 +53,18 @@ Required environment:
 Codex mode environment:
   CODEX_HOME               default: /home/agent/.codex (holds auth.json/config.toml)
   CODEX_MODEL              optional model override passed as `codex exec --model`
+                           and used as the generated config.toml model
+  CODEX_WIRE_API           default: responses (Codex >=0.130 removed "chat");
+                           set to "chat" only for gateways lacking /v1/responses
+  AI_FACTORY_CODEX_SKIP_CONFIG  set non-empty to skip config.toml generation and
+                           keep the default ChatGPT/auth.json login path
   AI_FACTORY_SKILL_FILE    default: /opt/ai-factory/skills/issue-fix/SKILL.md
   AI_FACTORY_WORKDIR       default: /workspace/repo
+
+Third-party model (no auth.json): when OPENAI_BASE_URL points at an
+OpenAI-compatible gateway (not api.openai.com) and OPENAI_API_KEY is set, codex
+mode auto-generates $CODEX_HOME/config.toml from OPENAI_BASE_URL / OPENAI_API_KEY
+/ (CODEX_MODEL or OPENAI_MODEL), so Codex uses that gateway instead of OpenAI.
 
 Optional environment:
   OPENAI_BASE_URL      default: https://api.openai.com/v1
@@ -127,6 +137,66 @@ compose_codex_prompt() {
     printf '%s\n' "${task}"
 }
 
+# Point Codex at a third-party OpenAI-compatible gateway by generating a
+# config.toml from the same env the openai-compatible mode already uses
+# (OPENAI_BASE_URL / OPENAI_API_KEY / model). This lets Codex run without a
+# ChatGPT auth.json and without ever contacting api.openai.com.
+#
+# Generation is skipped (leaving the default ChatGPT/auth.json behavior intact)
+# when any of the following holds:
+#   - AI_FACTORY_CODEX_SKIP_CONFIG is set to a non-empty value
+#   - OPENAI_API_KEY or OPENAI_BASE_URL is empty
+#   - OPENAI_BASE_URL still points at api.openai.com (the official endpoint)
+#   - $CODEX_HOME/config.toml already exists but was NOT written by us (i.e. an
+#     operator supplied their own config; it lacks our managed marker) -- we
+#     respect it and never overwrite it. A config carrying our marker (written
+#     on a previous run in a reused warm pod) is safely regenerated.
+CODEX_CONFIG_MARKER="# ai-factory: managed codex config, do not edit"
+
+maybe_write_codex_config() {
+    local codex_home="${CODEX_HOME:-${HOME}/.codex}"
+    local config="${codex_home}/config.toml"
+
+    if [[ -n "${AI_FACTORY_CODEX_SKIP_CONFIG:-}" ]]; then
+        return 0
+    fi
+    if [[ -z "${OPENAI_API_KEY:-}" || -z "${OPENAI_BASE_URL:-}" ]]; then
+        return 0
+    fi
+    # Only rewrite requests away from the official OpenAI endpoint; the default
+    # base URL keeps the ChatGPT-account (auth.json) login path.
+    local host="${OPENAI_BASE_URL#*://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+    if [[ "${host}" == "api.openai.com" ]]; then
+        return 0
+    fi
+    # Respect an operator-provided config.toml (one we did not write ourselves).
+    if [[ -e "${config}" ]] && ! head -n 1 "${config}" 2>/dev/null | grep -qF "${CODEX_CONFIG_MARKER}"; then
+        echo "ai-factory: existing operator ${config} found; leaving it as-is" >&2
+        return 0
+    fi
+
+    local model="${CODEX_MODEL:-${OPENAI_MODEL:-}}"
+    local wire_api="${CODEX_WIRE_API:-responses}"
+
+    mkdir -p "${codex_home}"
+    {
+        printf '%s\n' "${CODEX_CONFIG_MARKER}"
+        printf 'model = "%s"\n' "${model}"
+        printf 'model_provider = "aifactory"\n'
+        printf '\n'
+        printf '[model_providers.aifactory]\n'
+        printf 'name = "AI Factory Gateway"\n'
+        printf 'base_url = "%s"\n' "${OPENAI_BASE_URL}"
+        printf 'env_key = "OPENAI_API_KEY"\n'
+        printf 'wire_api = "%s"\n' "${wire_api}"
+    } > "${config}"
+
+    # Log endpoint/model for diagnostics; never the API key.
+    echo "ai-factory: codex config.toml -> base_url=${OPENAI_BASE_URL} model=${model:-<from OPENAI_MODEL>} wire_api=${wire_api}" >&2
+}
+
 # Delegated mode: run the pre-installed Codex CLI against the checkout. The
 # workflow (edit -> local CI -> commit -> push -> open PR) lives in the skill,
 # not here; this function only prepares and launches the engine.
@@ -135,6 +205,8 @@ run_codex() {
         echo "codex CLI not found in sandbox image; delegated mode requires it" >&2
         return 127
     fi
+
+    maybe_write_codex_config
 
     local prompt_body
     prompt_body="$(cat)"
