@@ -37,12 +37,26 @@
    写进 `$CODEX_HOME/config.toml`——正是 `maybe_write_codex_config()` 管的文件。TOML 规则下
    **根键（`model` / `model_provider`）必须在任何表头之前**，否则被算进上一个表。两者顺序与
    "不互相覆盖"必须在 `run_codex` 里安排好。
+5. **marketplace.json 的位置：Codex 没有自己的私有位置。** 逐一实测各候选路径：
+   `.agents/plugins/marketplace.json` ✅、`.claude-plugin/marketplace.json` ✅、
+   `.cursor-plugin/marketplace.json` ✅、**`.codex-plugin/marketplace.json` ❌ 被拒**
+   （`marketplace root does not contain...`）、根目录 `marketplace.json` ❌ 被拒。
+   即 Codex 刻意读**跨 harness 通用约定**目录（同一插件可被 Codex / Claude Code / Cursor 消费）。
+   **决策：用 harness 中立的 `.agents/plugins/marketplace.json`**（实测 codex 报出读的就是它）。
+   注意**不对称**：插件清单有原生位置 `.codex-plugin/plugin.json`，市场目录没有。
+6. **git 代理改写是必需的，不是障碍。** pod 直连 `github.com` **不稳定**（实测
+   `RPC failed; curl 16 HTTP2 framing layer`、`clone exit 128`、仓库页 curl 超时）。
+   而经 `gh-proxy` clone 成功。用临时 `GIT_CONFIG_GLOBAL` 模拟任务态的
+   `url."$AI_FACTORY_GIT_PROXY/https://github.com/".insteadOf` 后，`marketplace add` +
+   `plugin add` **全程成功**。→ 插件注册必须在 `configure-git-proxy` **之后**执行，
+   依赖该改写把 codex 的 git clone 导向 gh-proxy；**不可尝试关闭它**。
+
 
 ## 3. 总体架构
 
 ```
 独立插件仓库 (Verdure-oss/ai-factory-codex-plugins)      ← 单一事实源，push 即"发布"
-  .claude-plugin/marketplace.json
+  .agents/plugins/marketplace.json
   plugins/issue-fix/
     .codex-plugin/plugin.json
     skills/<role>/SKILL.md  (多个)
@@ -66,7 +80,7 @@ go-dev pod：ai-factory-agent 的 run_codex（codex exec 之前）
 新建独立仓库，与主仓发布解耦；`marketplace upgrade` 只拉这个小仓。结构（§2 已实测）：
 
 ```
-.claude-plugin/marketplace.json
+.agents/plugins/marketplace.json    # harness 中立位置（§2 结论 5）
 { "name": "ai-factory", "owner": "verdure-oss",
   "plugins": [ { "name": "issue-fix", "source": "./plugins/issue-fix",
                  "version": "0.1.0", "description": "ai-factory delegated issue→PR workflow" } ] }
@@ -76,6 +90,11 @@ plugins/issue-fix/.codex-plugin/plugin.json
 
 plugins/issue-fix/skills/<role>/SKILL.md   # frontmatter 必含 name + description
 ```
+
+**已落地状态（2026-08-28）**：仓库 `Verdure-oss/ai-factory-codex-plugins`（public）已创建并
+推送；含单个 `issue-fix` skill + `references/github.md`/`gitlab.md`；已在 go-dev pod 实测
+`marketplace add` + `plugin add` 成功（含任务态代理改写下）。本地检出位于
+`/root/ai-factory/ai-factory-codex-plugins`（与主仓同级，**不是** submodule）。
 
 - **多 skill 按角色拆**：现有单个 `SKILL.md` 拆成若干角色 skill（如 `speccer` / `planner` /
   `builder` / `reviewer` / `cleanup`，具体划分在执行计划里定）。每个 skill 的 `description`
@@ -130,16 +149,27 @@ plugins/issue-fix/skills/<role>/SKILL.md   # frontmatter 必含 name + descripti
 skill（元数据常驻，按 `description` 自主触发）。可在 prompt 里点名主入口 skill 或说明按身份选择；
 具体措辞在执行计划里定。仍保留"最终打印唯一 `__AI_FACTORY_RESULT__=` 结果行"的约定。
 
-### 4.5 网络与 git 代理
+### 4.5 网络与 git 代理（已实测，§2 结论 6）
 
-- go-dev pod 实测可直连 `github.com`（200）。任务态 `plan.go` 会注入
-  `git config --global url."$AI_FACTORY_GIT_PROXY/https://github.com/".insteadOf "https://github.com/"`，
-  `run_codex` 时该改写已生效，marketplace 的 git fetch 会经 `gh-proxy`。
-- **决策**：`AI_FACTORY_CODEX_PLUGIN_SOURCE` 允许直接填 `owner/repo` 或完整 https url；执行计划需
-  **实测**在任务态 insteadOf 生效下 `marketplace add/upgrade` 是否正常，若被 gh-proxy 干扰则改为
-  直接传 gh-proxy 形式的 url，或为该 fetch 局部关闭 insteadOf。
+- pod **直连 `github.com` 不稳定**（`RPC failed; curl 16 HTTP2 framing layer`、clone exit 128）。
+- 任务态 `plan.go` 注入的
+  `git config --global url."$AI_FACTORY_GIT_PROXY/https://github.com/".insteadOf "https://github.com/"`
+  **是必需依赖**：它把 codex 的 git clone 导向 `gh-proxy`，实测 `marketplace add` + `plugin add` 全程成功。
+- **决策**：插件注册步骤必须排在 `configure-git-proxy` **之后**；不得关闭或绕过该改写。
+  `AI_FACTORY_CODEX_PLUGIN_SOURCE` 填 `owner/repo`（如 `Verdure-oss/ai-factory-codex-plugins`）即可，
+  由 insteadOf 完成代理转换。
 
-### 4.6 退役旧机制（谨慎、可回退）
+### 4.6 两仓库的协作关系
+
+- 主仓 `Verdure-oss/ai-factory`（代码/helm/脚本）与插件仓 `Verdure-oss/ai-factory-codex-plugins`
+  **是两个独立仓库，不用 submodule/subtree**。运行时插件由 pod 内 codex 从 GitHub 拉取，
+  主仓在构建期/提交期不需要看见插件文件；用 submodule 只会带来指针同步负担、抵消解耦收益。
+- 本地布局：`/root/ai-factory/ai-factory/` 与 `/root/ai-factory/ai-factory-codex-plugins/` **同级**
+  （避免"仓库套仓库"）。
+- 节奏不对称（本改造的核心价值）：主仓走分支+PR+发版+重建镜像；插件仓可直接 push main，
+  **下个任务自动生效、不重建**。
+
+### 4.7 退役旧机制（谨慎、可回退）
 
 - 保留旧 `CODEX_SKILL_FILE` 注入作为**兜底**：当 `AI_FACTORY_CODEX_PLUGIN_SOURCE` 为空或插件注册
   失败且 cache 无可用副本时，回退到旧的"读单个 SKILL.md"（若仍挂载）。保证平滑迁移。
@@ -167,14 +197,16 @@ skill（元数据常驻，按 `description` 自主触发）。可在 prompt 里�
 
 ## 7. 分阶段落地（供执行计划细化）
 
-1. 建插件源仓库骨架 + 把现有 SKILL.md 内容迁入（先单 skill 跑通，再拆多角色）。
+1. ~~建插件源仓库骨架 + 把现有 SKILL.md 内容迁入~~ **已完成**（见 §4.1 已落地状态）。
+   后续再拆多角色 skill。
 2. `ai-factory-agent`：加 `maybe_register_codex_plugin()` + env + config.toml 顺序处理；
    加 `codex_plugin_test.sh`（TDD：假 codex on PATH，断言 add/upgrade/add 调用与 config 顺序、
    跳过开关、兜底路径）。
-3. 任务态代理下 marketplace fetch 实测（§4.5）。
+3. ~~任务态代理下 marketplace fetch 实测~~ **已完成**（§4.5，结论：代理改写是必需依赖）。
 4. Helm/deploy/update-config：新增插件相关 env/values；旧 `issue-fix-skill` 挂载在兜底期保留。
 5. 真实 issue 端到端验证：改插件 push → 新任务自动拿到（不重建 go-dev）。
-6. 收尾：清理旧 subPath 挂载与 `skillConfigMapName`（确认兜底不再需要后）。
+6. 收尾：清理主仓 `skills/issue-fix/`、旧 subPath 挂载与 `skillConfigMapName`（确认兜底不再需要后）。
+
 
 ## 8. 测试
 
