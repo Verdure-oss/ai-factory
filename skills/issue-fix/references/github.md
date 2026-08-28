@@ -19,6 +19,7 @@ Closes ${AI_FACTORY_ISSUE_URL}" ;;
 esac
 
 PR_URL="$(gh pr create \
+  -R "$AI_FACTORY_REPO" \
   --base "$AI_FACTORY_TARGET_BRANCH" \
   --head "$AI_FACTORY_BRANCH" \
   --title "$TITLE" \
@@ -26,17 +27,20 @@ PR_URL="$(gh pr create \
 
 # If a PR for this branch already exists (re-run), reuse its URL.
 if [ -z "$PR_URL" ]; then
-  PR_URL="$(gh pr view "$AI_FACTORY_BRANCH" --json url --jq .url 2>/dev/null)"
+  PR_URL="$(gh pr view "$AI_FACTORY_BRANCH" -R "$AI_FACTORY_REPO" --json url --jq .url 2>/dev/null)"
 fi
 ```
 
-`PR_URL` is what you write into the result contract.
+`PR_URL` is what you write into the result contract. Always pass `-R "$AI_FACTORY_REPO"`:
+a git proxy (`AI_FACTORY_GIT_PROXY`) may rewrite the origin remote to a non-github.com
+host, and without `-R` gh fails with "none of the git remotes ... point to a known
+GitHub host". `-R` names the repo explicitly so gh uses the API directly.
 
 ## Inspect CI (optional, only if the task needs it)
 
 ```sh
 gh pr checks "$AI_FACTORY_BRANCH" -R "$AI_FACTORY_REPO"
-gh pr view "$AI_FACTORY_BRANCH" --json statusCheckRollup,reviewDecision,mergeable
+gh pr view "$AI_FACTORY_BRANCH" -R "$AI_FACTORY_REPO" --json statusCheckRollup,reviewDecision,mergeable
 ```
 
 ## Phase 2 (not required for v1): react to remote CI / review

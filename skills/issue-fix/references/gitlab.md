@@ -23,6 +23,7 @@ Closes ${AI_FACTORY_ISSUE_URL}" ;;
 esac
 
 glab mr create \
+  -R "$AI_FACTORY_REPO" \
   --source-branch "$AI_FACTORY_BRANCH" \
   --target-branch "$AI_FACTORY_TARGET_BRANCH" \
   --title "$TITLE" \
@@ -32,12 +33,15 @@ glab mr create \
 # Extract the MR URL (glab prints it; also queryable).
 PR_URL="$(grep -Eo 'https?://[^ ]+/-/merge_requests/[0-9]+' /tmp/glab-mr.out | head -n1)"
 if [ -z "$PR_URL" ]; then
-  PR_URL="$(glab mr view "$AI_FACTORY_BRANCH" -F json 2>/dev/null | \
+  PR_URL="$(glab mr view "$AI_FACTORY_BRANCH" -R "$AI_FACTORY_REPO" -F json 2>/dev/null | \
     sed -n 's/.*"web_url" *: *"\([^"]*\)".*/\1/p' | head -n1)"
 fi
 ```
 
-`PR_URL` is what you write into the result contract.
+`PR_URL` is what you write into the result contract. Pass `-R "$AI_FACTORY_REPO"`:
+a git proxy (`AI_FACTORY_GIT_PROXY`) may rewrite the origin remote, which breaks
+glab's repo detection; `-R` names the project explicitly. For self-managed GitLab,
+also set `GITLAB_HOST` (above) so `-R` resolves to the right instance.
 
 ## Notes
 
