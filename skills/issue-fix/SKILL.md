@@ -87,14 +87,20 @@ Then open the change request with the provider CLI. Compact inline recipes
 TITLE="${AI_FACTORY_PR_TITLE:-fix: $(git log -1 --pretty=%s)}"
 BODY="${AI_FACTORY_PR_BODY:-Resolves ${AI_FACTORY_ISSUE_URL}}
 Closes ${AI_FACTORY_ISSUE_URL}"
-PR_URL="$(gh pr create --base "$AI_FACTORY_TARGET_BRANCH" --head "$AI_FACTORY_BRANCH" \
+# Always pass -R "$AI_FACTORY_REPO": a git proxy (AI_FACTORY_GIT_PROXY) may rewrite
+# the origin remote to a non-github.com host, which makes gh fail with "none of the
+# git remotes ... point to a known GitHub host". -R names the repo explicitly so gh
+# talks to the API directly and does not parse the remote URL.
+PR_URL="$(gh pr create -R "$AI_FACTORY_REPO" --base "$AI_FACTORY_TARGET_BRANCH" --head "$AI_FACTORY_BRANCH" \
   --title "$TITLE" --body "$BODY" 2>/dev/null)"
-[ -z "$PR_URL" ] && PR_URL="$(gh pr view "$AI_FACTORY_BRANCH" --json url --jq .url 2>/dev/null)"
+[ -z "$PR_URL" ] && PR_URL="$(gh pr view "$AI_FACTORY_BRANCH" -R "$AI_FACTORY_REPO" --json url --jq .url 2>/dev/null)"
 ```
 
 **GitLab** (`glab`, authed via `GITLAB_TOKEN`):
 ```sh
-glab mr create --source-branch "$AI_FACTORY_BRANCH" --target-branch "$AI_FACTORY_TARGET_BRANCH" \
+# -R "$AI_FACTORY_REPO" for the same reason as GitHub: don't let a rewritten remote
+# (via AI_FACTORY_GIT_PROXY) break glab's repo detection.
+glab mr create -R "$AI_FACTORY_REPO" --source-branch "$AI_FACTORY_BRANCH" --target-branch "$AI_FACTORY_TARGET_BRANCH" \
   --title "${AI_FACTORY_PR_TITLE:-fix: $(git log -1 --pretty=%s)}" \
   --description "${AI_FACTORY_PR_BODY:-Resolves ${AI_FACTORY_ISSUE_URL}}
 Closes ${AI_FACTORY_ISSUE_URL}" --yes >/tmp/glab.out 2>&1 || true
