@@ -23,6 +23,15 @@ data:
   # Leave codex.model empty to use the model from auth.json / ~/.codex/config.toml.
   CODEX_MODEL: {{ .Values.codex.model | quote }}
   {{- end }}
+  {{- if .Values.codex.plugin.source }}
+  # Codex marketplace plugin providing the delegated workflow skills. The agent
+  # runs `plugin marketplace add/upgrade` + `plugin add` per task, so a pushed
+  # skill edit lands on the next task without a rebuild.
+  AI_FACTORY_CODEX_PLUGIN_SOURCE: {{ .Values.codex.plugin.source | quote }}
+  AI_FACTORY_CODEX_PLUGIN_NAME: {{ .Values.codex.plugin.name | quote }}
+  AI_FACTORY_CODEX_MARKETPLACE_NAME: {{ .Values.codex.plugin.marketplace | quote }}
+  AI_FACTORY_CODEX_PLUGIN_REF: {{ .Values.codex.plugin.ref | quote }}
+  {{- end }}
   MAX_CONCURRENT_TASKS: {{ .Values.server.maxConcurrentTasks | quote }}
   CI_WATCH_ENABLED: {{ .Values.server.ciWatchEnabled | quote }}
   CI_WATCH_MAX_RETRIES: {{ .Values.server.ciWatchMaxRetries | quote }}

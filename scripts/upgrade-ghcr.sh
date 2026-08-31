@@ -91,6 +91,10 @@ HELM_ARGS=(
 # 来自 ai-factory.env 的 AGENT_COMMAND；留空则沿用 chart 现值。
 [[ -n "${AGENT_COMMAND:-}" ]] && HELM_ARGS+=(--set "agent.command=${AGENT_COMMAND}")
 [[ -n "${CODEX_MODEL:-}" ]] && HELM_ARGS+=(--set "codex.model=${CODEX_MODEL}")
+[[ -n "${AI_FACTORY_CODEX_PLUGIN_SOURCE:-}" ]] && HELM_ARGS+=(--set "codex.plugin.source=${AI_FACTORY_CODEX_PLUGIN_SOURCE}")
+[[ -n "${AI_FACTORY_CODEX_PLUGIN_NAME:-}" ]] && HELM_ARGS+=(--set "codex.plugin.name=${AI_FACTORY_CODEX_PLUGIN_NAME}")
+[[ -n "${AI_FACTORY_CODEX_MARKETPLACE_NAME:-}" ]] && HELM_ARGS+=(--set "codex.plugin.marketplace=${AI_FACTORY_CODEX_MARKETPLACE_NAME}")
+[[ -n "${AI_FACTORY_CODEX_PLUGIN_REF:-}" ]] && HELM_ARGS+=(--set "codex.plugin.ref=${AI_FACTORY_CODEX_PLUGIN_REF}")
 [[ -n "${GITLAB_API_BASE:-}" ]] && HELM_ARGS+=(--set "gitlab.apiBase=${GITLAB_API_BASE}")
 [[ -n "${GITLAB_TOKEN:-}" ]] && HELM_ARGS+=(--set "gitlab.token=${GITLAB_TOKEN}")
 [[ -n "${OPENAI_BASE_URL:-}" ]] && HELM_ARGS+=(--set "openai.baseUrl=${OPENAI_BASE_URL}")
