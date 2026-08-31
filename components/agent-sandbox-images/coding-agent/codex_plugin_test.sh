@@ -158,4 +158,25 @@ EOF
     echo "case6 OK"
 ) || exit 1
 
+# --- Case 7: plugin ready -> prompt tells codex to use the installed skill ---
+(
+    export AI_FACTORY_CODEX_PLUGIN_SOURCE="Verdure-oss/ai-factory-codex-plugins"
+    unset AI_FACTORY_CODEX_SKIP_PLUGIN FAKE_PLUGIN_ADD_FAILS
+    run_agent
+    grep -q 'installed Codex plugin' <<<"${CALLS}" \
+        || fail "case7: prompt does not mention the installed plugin: ${CALLS}"
+    echo "case7 OK"
+) || exit 1
+
+# --- Case 8: plugin unavailable -> prompt falls back to the SKILL.md path ---
+(
+    export AI_FACTORY_CODEX_PLUGIN_SOURCE="Verdure-oss/ai-factory-codex-plugins"
+    export FAKE_PLUGIN_ADD_FAILS=1
+    unset AI_FACTORY_CODEX_SKIP_PLUGIN
+    run_agent
+    grep -q 'installed Codex plugin' <<<"${CALLS}" \
+        && fail "case8: plugin prompt used even though registration failed"
+    echo "case8 OK"
+) || exit 1
+
 echo "codex-plugin-test: all cases passed"

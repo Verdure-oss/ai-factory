@@ -39,10 +39,11 @@ model-generated shell script in the current repository.
 
 Codex (delegated) mode reads the FactoryTask prompt from stdin and runs the
 pre-installed Codex CLI (`codex exec`) in the repository checkout. Codex follows
-an externally loaded workflow skill (default
-/opt/ai-factory/skills/issue-fix/SKILL.md) to fix the issue, run checks locally,
-commit, push, and open a PR/MR itself. It prints a final
-`__AI_FACTORY_RESULT__={...}` line the controller reads for the PR URL.
+the workflow skills from an installed Codex plugin (see
+AI_FACTORY_CODEX_PLUGIN_SOURCE), falling back to a single mounted SKILL.md to
+fix the issue, run checks locally, commit, push, and open a PR/MR itself. It
+prints a final `__AI_FACTORY_RESULT__={...}` line the controller reads for the
+PR URL.
 
   --check-config   Validate the OpenAI-compatible configuration offline and
                    exit without reading a prompt or making a network request.
@@ -59,6 +60,13 @@ Codex mode environment:
   AI_FACTORY_CODEX_SKIP_CONFIG  set non-empty to skip config.toml generation and
                            keep the default ChatGPT/auth.json login path
   AI_FACTORY_SKILL_FILE    default: /opt/ai-factory/skills/issue-fix/SKILL.md
+  AI_FACTORY_CODEX_PLUGIN_SOURCE  marketplace source (owner/repo, https git URL,
+                           or local path). Empty = plugin mode off, use
+                           AI_FACTORY_SKILL_FILE instead.
+  AI_FACTORY_CODEX_PLUGIN_NAME    default: issue-fix
+  AI_FACTORY_CODEX_MARKETPLACE_NAME default: ai-factory
+  AI_FACTORY_CODEX_PLUGIN_REF     default: main
+  AI_FACTORY_CODEX_SKIP_PLUGIN    set non-empty to skip plugin registration
   AI_FACTORY_WORKDIR       default: /workspace/repo
 
 Third-party model (no auth.json): when OPENAI_BASE_URL points at an
@@ -123,14 +131,18 @@ redact_secrets() {
     fi
 }
 
-# Build the Codex prompt: point it at the workflow skill, note the injected
-# task-context env vars, then hand it the FactoryTask instructions verbatim.
+# Build the Codex prompt. With the workflow plugin installed, Codex discovers
+# the skills itself (front-matter metadata is always in context), so we only
+# need to tell it to follow them. Without the plugin we fall back to naming the
+# single mounted SKILL.md file.
 compose_codex_prompt() {
-    local task="$1" skill="$2"
-    if [[ -f "${skill}" ]]; then
+    local task="$1" skill="$2" plugin_ready="${3:-false}"
+    if [[ "${plugin_ready}" == "true" ]]; then
+        printf 'Use the workflow skills from the installed Codex plugin as the authoritative playbook for this task: fix the issue, run the relevant checks locally, commit, push, and open a PR/MR yourself, then print the required result line.\n\n'
+    elif [[ -f "${skill}" ]]; then
         printf 'Read and strictly follow the workflow skill at %s. It is the authoritative playbook for this task: fix the issue, run the relevant checks locally, commit, push, and open a PR/MR yourself, then print the required result line.\n\n' "${skill}"
     else
-        echo "ai-factory: workflow skill ${skill} not found; proceeding with task instructions only" >&2
+        echo "ai-factory: no workflow plugin and no skill file ${skill}; proceeding with task instructions only" >&2
     fi
     printf 'Task context is available in these environment variables: AI_FACTORY_REPO, AI_FACTORY_BASE_REF, AI_FACTORY_BRANCH, AI_FACTORY_ISSUE_URL, AI_FACTORY_PR_TITLE, AI_FACTORY_PR_BODY, AI_FACTORY_REMOTE, AI_FACTORY_PROVIDER. Git auth (GITHUB_TOKEN/GITLAB_TOKEN) is already in the environment.\n\n'
     printf 'When finished, print exactly one final line: __AI_FACTORY_RESULT__={"pr_url":"<url>","branch":"<branch>","summary":"<one sentence>"} and nothing after it.\n\n'
@@ -265,7 +277,7 @@ run_codex() {
     fi
 
     local full_prompt
-    full_prompt="$(compose_codex_prompt "${prompt_body}" "${CODEX_SKILL_FILE}")"
+    full_prompt="$(compose_codex_prompt "${prompt_body}" "${CODEX_SKILL_FILE}" "${CODEX_PLUGIN_READY}")"
 
     if [[ -d "${CODEX_WORKDIR}" ]]; then
         cd "${CODEX_WORKDIR}"
