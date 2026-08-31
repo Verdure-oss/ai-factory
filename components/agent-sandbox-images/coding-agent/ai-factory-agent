@@ -183,14 +183,36 @@ maybe_write_codex_config() {
     if [[ "${host}" == "api.openai.com" ]]; then
         return 0
     fi
-    # Respect an operator-provided config.toml (one we did not write ourselves).
+    # Respect an operator-provided config.toml, but only a real one. Codex writes
+    # its own tables into this same file ([projects.*] on trust, [marketplaces.*]
+    # and [plugins.*] on `plugin marketplace add` / `plugin add`), so in a reused
+    # warm pod the file exists with no managed marker while carrying no provider
+    # settings at all. Treating that as an operator config silently drops Codex
+    # back to the official endpoint, ignoring OPENAI_BASE_URL. Only a file that
+    # actually declares a model/provider is left alone.
     if [[ -e "${config}" ]] && ! head -n 1 "${config}" 2>/dev/null | grep -qF "${CODEX_CONFIG_MARKER}"; then
-        echo "ai-factory: existing operator ${config} found; leaving it as-is" >&2
-        return 0
+        if grep -qE '^[[:space:]]*(model|model_provider)[[:space:]]*=|^[[:space:]]*\[model_providers\.' "${config}" 2>/dev/null; then
+            echo "ai-factory: existing operator ${config} found; leaving it as-is" >&2
+            return 0
+        fi
+        echo "ai-factory: ${config} holds Codex-owned tables only; merging gateway settings into it" >&2
     fi
 
     local model="${CODEX_MODEL:-${OPENAI_MODEL:-}}"
     local wire_api="${CODEX_WIRE_API:-responses}"
+
+    # Carry over every table Codex owns, dropping our own root keys and provider
+    # table so a regenerated block never duplicates. TOML requires root keys to
+    # precede all table headers, so ours are written first and these follow.
+    local preserved=""
+    if [[ -e "${config}" ]]; then
+        preserved="$(awk '
+            /^[[:space:]]*\[/ { section = $0 }
+            section == "" { next }                       # root keys before any table: ours
+            section ~ /^\[model_providers\.aifactory\]/ { next }
+            { print }
+        ' "${config}" 2>/dev/null)"
+    fi
 
     mkdir -p "${codex_home}"
     {
@@ -203,7 +225,10 @@ maybe_write_codex_config() {
         printf 'base_url = "%s"\n' "${OPENAI_BASE_URL}"
         printf 'env_key = "OPENAI_API_KEY"\n'
         printf 'wire_api = "%s"\n' "${wire_api}"
-    } > "${config}"
+        if [[ -n "${preserved}" ]]; then
+            printf '\n%s\n' "${preserved}"
+        fi
+    } > "${config}.tmp" && mv "${config}.tmp" "${config}"
 
     # Log endpoint/model for diagnostics; never the API key.
     echo "ai-factory: codex config.toml -> base_url=${OPENAI_BASE_URL} model=${model:-<from OPENAI_MODEL>} wire_api=${wire_api}" >&2
