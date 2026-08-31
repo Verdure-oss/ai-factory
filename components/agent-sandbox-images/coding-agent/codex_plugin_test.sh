@@ -36,7 +36,9 @@ first_call_line() {
 
 # Run `ai-factory-agent codex` with a fake codex that logs argv lines to
 # $CALLS_FILE. Set FAKE_PLUGIN_ADD_FAILS=1 (in env) to make `plugin add` exit 1.
-# Populates globals: RUN_STDOUT, RUN_STATUS, CALLS.
+# Pre-set AI_FACTORY_SKILL_FILE (to an existing file) to exercise the SKILL.md
+# prompt branch; left unset it points at a nonexistent path so the warn-only
+# branch runs. Populates globals: RUN_STDOUT, RUN_STATUS, CALLS.
 run_agent() {
     local workroot fakebin
     workroot="$(mktemp -d)"
@@ -61,7 +63,7 @@ EOF
 
     export CODEX_HOME="${workroot}/codexhome"; mkdir -p "${CODEX_HOME}"
     export AI_FACTORY_WORKDIR="${workroot}/repo"; mkdir -p "${AI_FACTORY_WORKDIR}"
-    export AI_FACTORY_SKILL_FILE="${workroot}/nonexistent-skill.md"
+    export AI_FACTORY_SKILL_FILE="${AI_FACTORY_SKILL_FILE:-${workroot}/nonexistent-skill.md}"
 
     set +e
     RUN_STDOUT="$(printf 'fix the bug\n' | \
@@ -168,14 +170,21 @@ EOF
     echo "case7 OK"
 ) || exit 1
 
-# --- Case 8: plugin unavailable -> prompt falls back to the SKILL.md path ---
+# --- Case 8: plugin registration failed + skill file present -> prompt falls
+# --- back to naming the mounted SKILL.md and drops the plugin wording ---
 (
     export AI_FACTORY_CODEX_PLUGIN_SOURCE="Verdure-oss/ai-factory-codex-plugins"
     export FAKE_PLUGIN_ADD_FAILS=1
     unset AI_FACTORY_CODEX_SKIP_PLUGIN
+    skill_dir="$(mktemp -d)"
+    export AI_FACTORY_SKILL_FILE="${skill_dir}/SKILL.md"
+    printf '# issue-fix\n' > "${AI_FACTORY_SKILL_FILE}"
     run_agent
     grep -q 'installed Codex plugin' <<<"${CALLS}" \
         && fail "case8: plugin prompt used even though registration failed"
+    grep -qF "Read and strictly follow the workflow skill at ${AI_FACTORY_SKILL_FILE}" <<<"${CALLS}" \
+        || fail "case8: prompt does not fall back to the mounted skill file: ${CALLS}"
+    rm -rf "${skill_dir}"
     echo "case8 OK"
 ) || exit 1
 
