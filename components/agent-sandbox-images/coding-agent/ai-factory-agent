@@ -197,6 +197,51 @@ maybe_write_codex_config() {
     echo "ai-factory: codex config.toml -> base_url=${OPENAI_BASE_URL} model=${model:-<from OPENAI_MODEL>} wire_api=${wire_api}" >&2
 }
 
+# Register and install the workflow plugin from a Codex marketplace so skill
+# edits take effect on the next task without rebuilding the image or the warm
+# pool pod. `plugin add` re-copies the source even at an unchanged version, so
+# running it every task is what makes updates propagate.
+#
+# Skipped entirely when AI_FACTORY_CODEX_PLUGIN_SOURCE is empty (feature off) or
+# AI_FACTORY_CODEX_SKIP_PLUGIN is set. Every step is best-effort: on failure we
+# warn and let run_codex fall back to the single-file SKILL.md prompt.
+#
+# MUST run after any git proxy insteadOf rewrite is in place: direct github.com
+# clones from the sandbox are unreliable and the rewrite routes them via the
+# proxy mirror.
+CODEX_PLUGIN_READY=false
+
+maybe_register_codex_plugin() {
+    local source="${AI_FACTORY_CODEX_PLUGIN_SOURCE:-}"
+    local name="${AI_FACTORY_CODEX_PLUGIN_NAME:-issue-fix}"
+    local marketplace="${AI_FACTORY_CODEX_MARKETPLACE_NAME:-ai-factory}"
+    local ref="${AI_FACTORY_CODEX_PLUGIN_REF:-main}"
+
+    if [[ -n "${AI_FACTORY_CODEX_SKIP_PLUGIN:-}" ]]; then
+        echo "ai-factory: AI_FACTORY_CODEX_SKIP_PLUGIN set; skipping plugin registration" >&2
+        return 0
+    fi
+    if [[ -z "${source}" ]]; then
+        return 0
+    fi
+
+    echo "ai-factory: registering codex plugin ${name}@${marketplace} from ${source}#${ref}" >&2
+
+    # Idempotent: re-adding an already-registered source is a no-op.
+    codex plugin marketplace add "${source}" --ref "${ref}" >&2 || \
+        echo "ai-factory: marketplace add reported an error (may already be registered)" >&2
+    # Refresh the git snapshot so a pushed skill edit is picked up.
+    codex plugin marketplace upgrade >&2 || \
+        echo "ai-factory: marketplace upgrade failed; using the existing snapshot" >&2
+
+    if codex plugin add "${name}@${marketplace}" >&2; then
+        CODEX_PLUGIN_READY=true
+        echo "ai-factory: codex plugin ${name}@${marketplace} installed" >&2
+    else
+        echo "ai-factory: codex plugin registration failed; falling back to the SKILL.md prompt" >&2
+    fi
+}
+
 # Delegated mode: run the pre-installed Codex CLI against the checkout. The
 # workflow (edit -> local CI -> commit -> push -> open PR) lives in the skill,
 # not here; this function only prepares and launches the engine.
@@ -206,7 +251,11 @@ run_codex() {
         return 127
     fi
 
+    # Order matters: our managed block writes root keys (model/model_provider)
+    # that must precede every [table]; `plugin add` then appends its own
+    # [marketplaces.*] / [plugins."x@y"] tables to the same config.toml.
     maybe_write_codex_config
+    maybe_register_codex_plugin
 
     local prompt_body
     prompt_body="$(cat)"
