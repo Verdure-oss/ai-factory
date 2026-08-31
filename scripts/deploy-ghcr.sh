@@ -109,6 +109,11 @@ GIT_PROVIDER=${GIT_PROVIDER}
 AGENT_COMMAND=${AGENT_COMMAND:-}
 # 可选：Codex 模型覆盖（留空=用 auth.json/config.toml 的默认模型）
 CODEX_MODEL=${CODEX_MODEL:-}
+# 可选：Codex marketplace 插件（留空=沿用单文件 SKILL.md 挂载）；详见 ai-factory.env.example
+AI_FACTORY_CODEX_PLUGIN_SOURCE=${AI_FACTORY_CODEX_PLUGIN_SOURCE:-}
+AI_FACTORY_CODEX_PLUGIN_NAME=${AI_FACTORY_CODEX_PLUGIN_NAME:-}
+AI_FACTORY_CODEX_MARKETPLACE_NAME=${AI_FACTORY_CODEX_MARKETPLACE_NAME:-}
+AI_FACTORY_CODEX_PLUGIN_REF=${AI_FACTORY_CODEX_PLUGIN_REF:-}
 GITHUB_TOKEN=${GITHUB_TOKEN}
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -170,6 +175,10 @@ HELM_ARGS=(
 # Agent 运行模式：设置 agent.command（含 "codex" 时 webhook 自动置 delegated）。
 [[ -n "${AGENT_COMMAND:-}" ]] && HELM_ARGS+=(--set "agent.command=${AGENT_COMMAND}")
 [[ -n "${CODEX_MODEL:-}" ]] && HELM_ARGS+=(--set "codex.model=${CODEX_MODEL}")
+[[ -n "${AI_FACTORY_CODEX_PLUGIN_SOURCE:-}" ]] && HELM_ARGS+=(--set "codex.plugin.source=${AI_FACTORY_CODEX_PLUGIN_SOURCE}")
+[[ -n "${AI_FACTORY_CODEX_PLUGIN_NAME:-}" ]] && HELM_ARGS+=(--set "codex.plugin.name=${AI_FACTORY_CODEX_PLUGIN_NAME}")
+[[ -n "${AI_FACTORY_CODEX_MARKETPLACE_NAME:-}" ]] && HELM_ARGS+=(--set "codex.plugin.marketplace=${AI_FACTORY_CODEX_MARKETPLACE_NAME}")
+[[ -n "${AI_FACTORY_CODEX_PLUGIN_REF:-}" ]] && HELM_ARGS+=(--set "codex.plugin.ref=${AI_FACTORY_CODEX_PLUGIN_REF}")
 [[ -n "${GITLAB_TOKEN:-}" ]] && HELM_ARGS+=(--set "gitlab.token=${GITLAB_TOKEN}")
 [[ -n "${GITLAB_API_BASE:-}" ]] && HELM_ARGS+=(--set "gitlab.apiBase=${GITLAB_API_BASE}")
 [[ -n "${OPENAI_TEMPERATURE:-}" ]] && HELM_ARGS+=(--set "openai.temperature=${OPENAI_TEMPERATURE}")

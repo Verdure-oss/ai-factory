@@ -115,6 +115,21 @@ codex:
   # for a custom provider it is whatever config.toml sets).
   model: ""
 
+  # Codex marketplace plugin carrying the delegated workflow skills. When
+  # `source` is set, the agent registers this marketplace and reinstalls the
+  # plugin at the start of every task, so pushing a skill edit takes effect on
+  # the next task with no image or pod rebuild. Empty = keep using the
+  # skillConfigMapName single-file mount.
+  plugin:
+    # owner/repo, an https git URL, or a local path inside the sandbox.
+    source: ""
+    # Plugin name as declared in the marketplace catalog.
+    name: "issue-fix"
+    # Marketplace name (the `name` field in .agents/plugins/marketplace.json).
+    marketplace: "ai-factory"
+    # Git ref to track.
+    ref: "main"
+
 # Agent configuration
 agent:
   # Agent name
