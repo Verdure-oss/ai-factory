@@ -192,4 +192,64 @@ EOF
     echo "case6 PASS: managed (marked) config regenerated on reuse"
 ) || exit 1
 
+# --- Case 7: a config.toml holding only Codex-owned tables is still ours to fill ---
+# Codex itself writes [projects.*] / [marketplaces.*] / [plugins.*] into
+# config.toml (project trust, `plugin marketplace add`, `plugin add`). Such a file
+# has no managed marker on line 1, but it is NOT an operator gateway config, so
+# skipping generation would silently drop us back to the official endpoint.
+(
+    export OPENAI_BASE_URL="https://gw3.example.com/v1"
+    export OPENAI_API_KEY="sk-test-123"
+    export OPENAI_MODEL="gw3-model"
+    unset CODEX_MODEL 2>/dev/null || true
+    unset AI_FACTORY_CODEX_SKIP_CONFIG 2>/dev/null || true
+
+    workroot="$(mktemp -d)"
+    fakebin="$(mktemp -d)"
+    cat > "${fakebin}/codex" <<'EOF'
+#!/usr/bin/env bash
+cat "${CODEX_HOME}/config.toml"
+echo '__AI_FACTORY_RESULT__={"pr_url":"http://example/pr/1","branch":"b","summary":"s"}'
+EOF
+    chmod +x "${fakebin}/codex"
+    export CODEX_HOME="${workroot}/codexhome"
+    mkdir -p "${CODEX_HOME}"
+    # Exactly what a reused warm pod looks like after a prior task: Codex-owned
+    # tables only, no provider settings, no managed marker.
+    cat > "${CODEX_HOME}/config.toml" <<'EOF'
+[projects."/workspace/repo"]
+trust_level = "trusted"
+
+[marketplaces.ai-factory]
+source_type = "git"
+source = "https://github.com/Verdure-oss/ai-factory-codex-plugins.git"
+ref = "main"
+
+[plugins."issue-fix@ai-factory"]
+enabled = true
+EOF
+    export AI_FACTORY_WORKDIR="${workroot}/repo"; mkdir -p "${AI_FACTORY_WORKDIR}"
+    export AI_FACTORY_SKILL_FILE="${workroot}/none.md"
+
+    out="$(printf 'x\n' | PATH="${fakebin}:${PATH}" bash "${AGENT}" codex 2>/dev/null || true)"
+    grep -q 'model_provider = "aifactory"' <<<"${out}" \
+        || fail "case7: gateway config must be written even when Codex-owned tables already exist"
+    grep -q 'base_url = "https://gw3.example.com/v1"' <<<"${out}" \
+        || fail "case7: base_url missing after merging with Codex-owned tables"
+    # Codex's own tables must survive; clobbering them would drop plugin state.
+    grep -q '\[plugins."issue-fix@ai-factory"\]' <<<"${out}" \
+        || fail "case7: Codex-owned [plugins.*] table was destroyed"
+    grep -q '\[marketplaces.ai-factory\]' <<<"${out}" \
+        || fail "case7: Codex-owned [marketplaces.*] table was destroyed"
+    # TOML: our root keys must precede every table header.
+    first_table="$(grep -n '^\[' <<<"${out}" | head -1 | cut -d: -f1)"
+    model_line="$(grep -n '^model = ' <<<"${out}" | head -1 | cut -d: -f1)"
+    [[ -n "${first_table}" && -n "${model_line}" ]] \
+        || fail "case7: expected both root keys and table headers in the merged config"
+    (( model_line < first_table )) \
+        || fail "case7: root keys must precede the first [table] (TOML), got model@${model_line} table@${first_table}"
+    rm -rf "${fakebin}" "${workroot}"
+    echo "case7 PASS: gateway config merged into a Codex-owned config.toml"
+) || exit 1
+
 echo "codex-config-test: PASS"
