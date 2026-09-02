@@ -118,28 +118,20 @@ HELM_ARGS=(
 [[ -n "${CI_WATCH_MAX_TOOL_ROUNDS:-}" ]] && HELM_ARGS+=(--set "server.ciWatchMaxToolRounds=${CI_WATCH_MAX_TOOL_ROUNDS}")
 [[ -n "${CI_WATCH_LOG_SNIPPET_LINES:-}" ]] && HELM_ARGS+=(--set "server.ciWatchLogSnippetLines=${CI_WATCH_LOG_SNIPPET_LINES}")
 
-# Codex delegated-mode assets (optional). Publish scripts/auth.json as the
-# codex-auth Secret and the in-repo issue-fix skill as a ConfigMap, then enable
-# the mounts. No-ops when the files are absent. The warm pool is recreated later
-# in this script (steps 5-6), so recycled pods pick up the new mounts.
+# Codex delegated-mode auth (optional). Publish scripts/auth.json as the
+# codex-auth Secret and enable the mount. No-op when the file is absent. The
+# warm pool is recreated later in this script (steps 5-6), so recycled pods pick
+# up the new mount.
 CODEX_AUTH_FILE=""
 for f in "${SCRIPT_DIR}/auth.json" "${SCRIPT_DIR}/codex/auth.json"; do
   [[ -f "${f}" ]] && CODEX_AUTH_FILE="${f}" && break
 done
-SKILL_FILE="${SCRIPT_DIR}/../skills/issue-fix/SKILL.md"
 if [[ -n "${CODEX_AUTH_FILE}" ]]; then
   kubectl create secret generic codex-auth --namespace "${NAMESPACE}" \
     --from-file=auth.json="${CODEX_AUTH_FILE}" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   HELM_ARGS+=(--set "codex.authSecretName=codex-auth")
   echo "   ✓ codex-auth Secret (来自 ${CODEX_AUTH_FILE})"
-fi
-if [[ -f "${SKILL_FILE}" ]]; then
-  kubectl create configmap issue-fix-skill --namespace "${NAMESPACE}" \
-    --from-file=SKILL.md="${SKILL_FILE}" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  HELM_ARGS+=(--set "codex.skillConfigMapName=issue-fix-skill")
-  echo "   ✓ issue-fix-skill ConfigMap"
 fi
 
 # HELM_ARGS 需带引号展开：agent.command 取值可能含空格（"ai-factory-agent codex"），

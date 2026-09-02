@@ -205,23 +205,19 @@ if [[ -n "${GITHUB_REPOSITORY_ALLOWLIST:-}" ]]; then
   for repo in "${REPOS[@]}"; do repo="$(echo "${repo}" | xargs)"; [[ -n "${repo}" ]] && HELM_ARGS+=(--set "github.repositoryAllowList[${idx}]=${repo}"); idx=$((idx+1)); done
 fi
 
-# Codex delegated-mode assets (optional). If scripts/auth.json (the output of
+# Codex delegated-mode auth (optional). If scripts/auth.json (the output of
 # `codex login`, or an API-key auth.json) is present, publish it as the
-# codex-auth Secret and enable the mount. Likewise publish the in-repo issue-fix
-# skill as a ConfigMap so it can be edited without rebuilding the image. Both are
-# no-ops when the files are absent. The namespace is created first because helm's
-# --create-namespace only runs at chart install time.
+# codex-auth Secret and enable the mount. No-op when the file is absent. The
+# namespace is created first because helm's --create-namespace only runs at chart
+# install time.
 CODEX_AUTH_FILE=""
 for f in "${SCRIPT_DIR}/auth.json" "${SCRIPT_DIR}/codex/auth.json"; do
   [[ -f "${f}" ]] && CODEX_AUTH_FILE="${f}" && break
 done
-SKILL_FILE="${SCRIPT_DIR}/../skills/issue-fix/SKILL.md"
-if [[ -n "${CODEX_AUTH_FILE}" || -f "${SKILL_FILE}" ]]; then
-  echo ""
-  echo "3.1 配置 Codex 委托模式资源..."
-  kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
-fi
 if [[ -n "${CODEX_AUTH_FILE}" ]]; then
+  echo ""
+  echo "3.1 配置 Codex 委托模式认证..."
+  kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
   kubectl create secret generic codex-auth --namespace "${NAMESPACE}" \
     --from-file=auth.json="${CODEX_AUTH_FILE}" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -229,13 +225,6 @@ if [[ -n "${CODEX_AUTH_FILE}" ]]; then
   echo "   ✓ codex-auth Secret (来自 ${CODEX_AUTH_FILE})"
 else
   echo "   (未发现 scripts/auth.json，跳过 Codex 认证挂载)" 2>/dev/null || true
-fi
-if [[ -f "${SKILL_FILE}" ]]; then
-  kubectl create configmap issue-fix-skill --namespace "${NAMESPACE}" \
-    --from-file=SKILL.md="${SKILL_FILE}" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  HELM_ARGS+=(--set "codex.skillConfigMapName=issue-fix-skill")
-  echo "   ✓ issue-fix-skill ConfigMap"
 fi
 
 # HELM_ARGS 需带引号展开：agent.command 等取值可能含空格（如

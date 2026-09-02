@@ -2,14 +2,13 @@
 # ai-factory 配置热更新脚本
 # 用法: ./scripts/update-config.sh [path-to-env-file]
 #
-# 从 .env 文件读取配置，分别更新 K8s Secret 和 ConfigMap；若存在
-# skills/issue-fix/SKILL.md，同时更新 issue-fix-skill ConfigMap（委托模式的工作流）。
+# 从 .env 文件读取配置，分别更新 K8s Secret 和 ConfigMap。
 #
 # 生效方式分两类：
 #   - ai-factory-server：Secret/ConfigMap 以文件挂载，K8s 会在 ~30s 内自动同步，
 #     无需重启（MAX_CONCURRENT_TASKS 除外，见文末）。
 #   - go-dev 预热 pod：通过 envFrom 引用 Secret/ConfigMap，env 是 pod 启动时的快照，
-#     且 skill 走 subPath 挂载（不热更新），因此脚本会重建 go-dev pod 使新配置/skill 生效。
+#     因此脚本会重建 go-dev pod 使新配置生效。
 #
 # 默认读取: scripts/ai-factory.env
 
@@ -116,23 +115,6 @@ fi
 echo ""
 echo "✅ 配置更新完成！"
 
-# 更新 issue-fix 委托工作流 skill（若源文件存在）。
-# 这是一个独立的 ConfigMap（issue-fix-skill），与 ai-factory-config 互不影响。
-# 只更新内容；首次装机时由 deploy/upgrade 脚本通过 helm 设置
-# codex.skillConfigMapName 完成挂载，热更新场景挂载已存在。
-# skill 以 subPath 挂进 go-dev（不会热更新），靠下方重建 go-dev 生效。
-SKILL_FILE="${SCRIPT_DIR}/../skills/issue-fix/SKILL.md"
-if [ -f "${SKILL_FILE}" ]; then
-    echo ""
-    echo "📝 更新 issue-fix-skill ConfigMap（委托工作流）..."
-    kubectl create configmap issue-fix-skill \
-        --from-file=SKILL.md="${SKILL_FILE}" \
-        -n "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-    echo "   ✓ issue-fix-skill ConfigMap 已更新（来自 ${SKILL_FILE}）"
-else
-    echo ""
-    echo "ℹ️  未发现 ${SKILL_FILE}，跳过 skill 更新"
-fi
 
 echo ""
 echo "📌 ai-factory-server 会在 ~30s 内自动同步挂载文件，无需重启。"

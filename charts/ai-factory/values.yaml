@@ -93,7 +93,8 @@ sandbox:
 # Codex delegated mode (optional). When the agent command runs Codex, the agent
 # owns the full workflow (edit/local-CI/commit/push/PR) driven by an editable
 # skill. Codex is pre-installed in the sandbox image; these wire in its auth and
-# the workflow skill. Both are empty by default (delegated mode off).
+# the marketplace plugin carrying the workflow skill. Empty by default (delegated
+# mode off).
 codex:
   # Name of a Secret holding Codex auth (`codex login` output). It must have a
   # key `auth.json`; it is mounted read-only at /home/agent/.codex/auth.json.
@@ -102,12 +103,6 @@ codex:
   #     --from-file=auth.json=$HOME/.codex/auth.json
   authSecretName: ""
 
-  # Name of a ConfigMap holding the issue-fix workflow skill. Its `SKILL.md`
-  # key is mounted read-only at /opt/ai-factory/skills/issue-fix/SKILL.md, so
-  # you can adjust the workflow without rebuilding the image. Create it with:
-  #   kubectl -n <ns> create configmap issue-fix-skill \
-  #     --from-file=SKILL.md=skills/issue-fix/SKILL.md
-  skillConfigMapName: ""
 
   # Optional model override for Codex delegated mode, passed as `codex exec
   # --model`. Empty = use the default from auth.json / ~/.codex/config.toml
@@ -118,8 +113,8 @@ codex:
   # Codex marketplace plugin carrying the delegated workflow skills. When
   # `source` is set, the agent registers this marketplace and reinstalls the
   # plugin at the start of every task, so pushing a skill edit takes effect on
-  # the next task with no image or pod rebuild. Empty = keep using the
-  # skillConfigMapName single-file mount.
+  # the next task with no image or pod rebuild. Empty = plugin mode off (the
+  # agent runs with task instructions only, or the skill path set via env).
   plugin:
     # owner/repo, an https git URL, or a local path inside the sandbox.
     source: ""
