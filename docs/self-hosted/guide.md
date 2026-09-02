@@ -1,6 +1,4 @@
-# ai-factory 指南ude
-
-
+# ai-factory 指南
 
 ## 一、概述
 
@@ -26,14 +24,15 @@ Issue → FactoryTask → Sandbox + Agent 改码 → PR/MR → CI 验证/自动�
 **核心原则：**
 
 - **声明式任务模型** — `FactoryTask` 是 Kubernetes CRD，有完整的六阶段状态机（Pending → ClaimCreated → SandboxReady → Running → Succeeded / Failed），每个阶段转换都记录为 Condition + timestamp + reason
-- **提供商中立** — 支持任何 OpenAI-compatible API，通过 `OPENAI_BASE_URL` 切换，不绑定特定厂商
-- **Kubernetes 原生** — CRD + Controller Pattern，可部署在任何 K8s 集群（kind / GKE / EKS / 自建）
-- **幂等性** — 同一个 FactoryTask 可重复 reconcile；并发 apply 报 `AlreadyExists` 时输家视为成功；终态（Failed / Succeeded）后删旧建新，用户重打标签即可重新触发
+
 - **自修复闭环** — CI 失败自动进入 repair loop，agent 读取错误日志 → 分析原因 → 修复代码 → force-push → CI 重检，默认最多 3 轮（`server.ciWatchMaxRetries: 3`）
-- **Provider-neutral 执行计划** — `ExecutionPlan` 从 FactoryTask spec 转换为统一的 shell 脚本序列（clone → checkout → agent → commit → push），同时适配 GitHub 和 GitLab
-- **两种操作模式** — `run`（完整 agent 流程：改码 + 验证 + 创建 PR）和 `smoke`（仅验证工具链，不改代码）
-- **两种 Agent 引擎** — `scripted`（默认：LLM 三段式产出 shell 脚本，git/PR/CI 由 Go 控制器负责）和 `delegated`（Codex + 可编辑的 workflow skill 自主走完 issue→PR，控制器退化为瘦启动器）；通过 `AGENT_COMMAND` 选择（见 §2.9）
-- **热更新** — 配置存在 ConfigMap/Secret 中；server 通过文件挂载自动同步（约 30s），go-dev 预热 pod 因 env 是创建时快照需重建生效，`update-config.sh` 一键完成（见 §2.7）
+
+- **统一执行计划** — 从 FactoryTask spec 转换为统一的步骤序列（clean → clone → checkout → agent → commit → push），通过沙箱统一执行，同时适配 GitHub 和 GitLab
+
+- **两种 Agent 引擎** — `scripted`（默认：LLM 三段式产出 shell 脚本，git/PR/CI 由 Go 控制器负责）和 `delegated`（Codex + 可编辑的 workflow skill 自主走完 issue→PR，控制器退化为瘦启动器）；通过 `AGENT_COMMAND` 选择（见 2.9）
+
+- **热更新** — 配置存在 ConfigMap/Secret 中，通过 volume 注入 Pod，修改 env 文件后无需重启即可生效
+
 - **任务重试** — 任务达到终态（Failed / Succeeded）后删旧建新，用户重打标签即可重新触发
 
 ### 1.2 实现思路
@@ -124,30 +123,66 @@ ai-factory 打包后产出 3 个镜像，每个环节由对应的镜像负责：
 
 ![](E:\Data\Desktop\fig1.png)
 
+### 1.4 Codex 插件体系（委托模式的工作流 skill）
+
+delegated 模式（见 §2.9）的"剧本"由独立插件仓 `Verdure-oss/ai-factory-codex-plugins` 承载与分发。沙箱里的 `ai-factory-agent codex` 会在**每个任务开始时**自动注册市场并安装最新插件。
+
+插件内含 **3 个 skill**，一个任务里按"编排 → 执行 → 审查"协作：
+
+```
+issue-fix（编排者）
+   │  规划任务、理解 issue
+   ├─→ 派发 builder：实现最小正确改动 + 本地校验
+   ├─→ 派发 reviewer：审查 diff → APPROVE / REQUEST_CHANGES
+   └─  汇总后自行 commit → push → 开 PR/MR
+```
+
+| Skill       | 角色  | 职责                                           |
+| ----------- | --- | -------------------------------------------- |
+| `issue-fix` | 编排者 | 总控流程：规划 → 派发 builder / reviewer → 提交推送、开变更请求 |
+| `builder`   | 执行者 | 被派发：实现最小改动并本地校验                              |
+| `reviewer`  | 审查者 | 被派发：审查 diff，给出 APPROVE / REQUEST_CHANGES     |
+
+**设计动机 —— 引擎与流程分层**：
+
+- **引擎与流程解耦**：引擎（怎么起 Codex）与流程（做哪些步骤）彻底分开。skill 是外部可加载、可随时改的 markdown —— 改 skill 只需改插件仓再 push，**不动 Go 代码、不重建镜像**。
+- **skill 可按角色拆成子 skill，流程中按需加载**：把一套流程拆成编排（`issue-fix`）、执行（`builder`）、审查（`reviewer`）等独立 skill。每个 skill 用 front-matter 的 `description` 声明"何时适用"，Codex 在**对应阶段才加载对应角色** —— 例如先加载编排 skill 规划任务，再在实现阶段加载 builder、审查阶段加载 reviewer。相比一份超大单体 skill，角色拆分让每步指令更聚焦、各角色可独立迭代，改一个角色不影响其他流程。
+
 ---
 
 ## 二、部署指南
 
 ### 2.1 前置条件
 
-| 项目            | 要求                            |
-| ------------- | ----------------------------- |
-| Kubernetes 集群 | 1.24+，≥ 2 节点（推荐 3+），2C4G+     |
-| kubectl       | 已配置当前上下文                      |
-| Helm          | 3.x                           |
-| 容器运行时         | Docker 或 nerdctl + buildkit   |
-| 网络            | 能访问 GitHub API 和 LLM endpoint |
-
-支持的集群类型：kind、minikube、GKE / EKS / AKS、自建集群。
+需要一台可访问的 K8s 集群（1.24+），`kubectl` 已指向该集群。
 
 **网络要求补充**：
 
 - 能访问 GitHub（克隆 agent-sandbox 仓库，构建时需要）
 - 若启用 Codex 插件 marketplace（§2.9），沙箱还需能访问插件源仓库（任务态经 `AI_FACTORY_GIT_PROXY` 的 `insteadOf` 改写路由，务必配置 `gitProxy`）
 
-### 2.2 快速部署（推荐路径）
+github源码地址：https://github.com/Verdure-oss/ai-factory
 
-#### Step 1：构建镜像包
+插件地址：https://github.com/Verdure-oss/ai-factory-codex-plugins
+
+### 2.2 部署方式（在线 / 离线）
+
+提供两种部署路径， 在线部署**（无需本地构建镜像）；离线包部署。
+
+#### 方式 A：GHCR 在线部署（推荐）
+
+**前置**：镜像与 Helm chart 已发布到 `ghcr.io/verdure-oss/`（仓库打 `v*` tag 或手动触发 `.github/workflows/publish.yaml` 后自动推送）。
+
+```bash
+./scripts/deploy-ghcr.sh          # 默认 latest
+./scripts/deploy-ghcr.sh v0.1.9   # 指定版本
+```
+
+脚本自动完成：安装 FactoryTask 与 agent-sandbox CRD（控制器镜像直接取自 GHCR）→ 从 `ai-factory.env` 加载凭证 → 安装 OCI Helm chart（`oci://ghcr.io/verdure-oss/charts/ai-factory`）→ 等待 rollout。若存在 `scripts/auth.json`，自动挂载 Codex 委托模式认证。
+
+#### 方式 B：离线包部署（内网 / 无 GHCR）
+
+##### Step 1：构建镜像包
 
 在开发机器上运行：
 
@@ -176,20 +211,11 @@ dist/
 └── ai-factory.env                         # 配置模板
 ```
 
-#### Step 2：传输到目标机器
+##### Step 2：传输到目标机器
+
+##### Step 3：一键部署
 
 ```bash
-# scp
-scp -r dist/ user@your-vm:/opt/ai-factory/
-
-# 或 rsync（推荐，支持断点续传）
-rsync -avz --progress dist/ user@your-vm:/opt/ai-factory/dist/
-```
-
-#### Step 3：一键部署
-
-```bash
-ssh user@your-vm
 cd /opt/ai-factory/dist/
 
 # 编辑配置文件（填入真实的 token、secret 等值）
@@ -202,14 +228,16 @@ vim ai-factory.env
 部署脚本会自动完成：
 
 1. 检查 kubectl 和集群连接
-2. 导入镜像（自动识别 docker / containerd / cri 运行时）
-3. 如果是 kind 集群，自动加载镜像到 kind
-4. 安装 FactoryTask CRD 和 agent-sandbox CRD（含 namespace、RBAC）
-5. 修正 agent-sandbox 控制器镜像拉取策略（离线环境强制 `imagePullPolicy=IfNotPresent`）
-6. 从 `ai-factory.env` 加载凭证配置（缺失项交互式收集）
-7. 安装 Helm chart 并等待 rollout
 
-预计总耗时：5-15 分钟（取决于网络和镜像大小）。
+2. 导入镜像（自动识别 docker / containerd / cri 运行时）
+
+3. 如果是 kind 集群，自动加载镜像到 kind
+
+4. 安装 FactoryTask CRD 和 agent-sandbox CRD
+
+5. 从 `ai-factory.env` 加载凭证配置
+
+6. 安装 Helm chart 并等待 rollout
 
 **终端输出示例：**
 
@@ -268,13 +296,12 @@ go-dev    2/2     30s
 
 运行时凭证存放在 K8s Secret **`ai-factory-credentials`** 中（由 `deploy-remote.sh` 初次创建，`update-config.sh` 维护更新）：
 
-| Key              | 用途                                        | 必需           |
-| ---------------- | ----------------------------------------- | ------------ |
-| `GITHUB_TOKEN`   | GitHub PAT，repo 权限                        | ✅（GitHub 模式） |
-| `WEBHOOK_SECRET` | HMAC-SHA256 签名密钥                          | ✅            |
-| `OPENAI_API_KEY` | LLM 调用凭证（scripted 模式 + delegated 第三方网关共用） | ✅            |
-| `GITLAB_TOKEN`   | GitLab PAT，需要 `api` + `write_repository` 权限      | ✅（GitLab 模式） |
-| `CODEX_API_KEY`  | 保留字段（脱敏兼容，新委托模式不再依赖）                      | 可选           |
+| Key              | 用途                                          | 必需           |
+| ---------------- | ------------------------------------------- | ------------ |
+| `GITHUB_TOKEN`   | GitHub PAT，repo 权限                          | ✅（GitHub 模式） |
+| `WEBHOOK_SECRET` | HMAC-SHA256 签名密钥                            | ✅            |
+| `OPENAI_API_KEY` | LLM 调用凭证                                    | ✅            |
+| `GITLAB_TOKEN`   | GitLab PAT，需要 `api` + `write_repository` 权限 | ✅（GitLab 模式） |
 
 > **delegated 模式的登录凭证**：走 ChatGPT 账号登录时，需额外创建 `codex-auth` Secret，把 `codex login` 生成的 `auth.json` 挂进沙箱：
 > 
@@ -283,17 +310,13 @@ go-dev    2/2     30s
 >   --from-file=auth.json=$HOME/.codex/auth.json
 > ```
 > 
-> 若改用第三方 OpenAI 兼容网关（见 §2.9），则**不需要** `auth.json` —— 沙箱会在任务开始时用 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / 模型名自动生成 `~/.codex/config.toml`。
+>   若改用第三方 OpenAI 兼容网关（见 §2.9），则**不需要** `auth.json` —— 沙箱会在任务开始时用 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / 模型名自动生成 `~/.codex/config.toml`。
 
 > **`GITHUB_TOKEN` 获取方式**：GitHub → Settings → Developer settings → Personal access tokens → Tokens(classic) → Generate new token → 勾选 `repo public_repo` 权限。
 > 
 > > 注意：token 只是"凭证"，对应的 GitHub 账号还需拥有目标仓库的协作者权限（至少 Triage）。自有仓库无需额外操作；公共/他人仓库需要将机器人账号添加为 collaborator。
 
-### 2.4 Helm Chart 核心参数速查
-
-> 参数路径对应 `charts/ai-factory/values.yaml`，安装/升级时用 `--set path=value` 覆盖；与 `ai-factory.env` 的映射见 §2.7。当前 chart 版本 **v0.1.9**。
-
-**server（任务调度与 CI 修复）**
+### 2.4 Helm Chart 核心参数
 
 | 参数路径                            | 默认值    | 说明                                                                 |
 | ------------------------------- | ------ | ------------------------------------------------------------------ |
@@ -301,69 +324,13 @@ go-dev    2/2     30s
 | `server.ciWatchEnabled`         | `true` | 启用 CI feedback repair（仅 GitHub）                                    |
 | `server.ciWatchMaxRetries`      | `3`    | CI 修复最大轮数                                                          |
 | `server.ciWatchMaxWait`         | `30m`  | 每轮等待 CI 的最大时长                                                      |
-| `server.ciWatchSettleInterval`  | `60s`  | .                                                                  |
+| `server.ciWatchSettleInterval`  | `60s`  | 等所有 check 收敛的确认窗口（不等待 CI 跑完）                                       |
 | `server.ciWatchMaxToolRounds`   | `3`    | CI 修复时 agent 的最大工具轮数                                               |
 | `server.ciWatchLogSnippetLines` | `20`   | 附在 issue 评论里的 CI 失败日志行数                                            |
 | `watchInterval`                 | `15s`  | Controller 轮询间隔                                                    |
 | `taskTimeout`                   | `30m`  | SandboxClaim 就绪超时                                                  |
 | `changeRequestEnabled`          | `true` | 是否创建 PR/MR                                                         |
 | `reportEnabled`                 | `true` | 是否回帖汇报结果                                                           |
-
-**agent（Agent 命令）**
-
-| 参数路径                       | 默认值                                     | 说明                                                 |
-| -------------------------- | --------------------------------------- | -------------------------------------------------- |
-| `agent.command`            | `ai-factory-agent openai-compatible`    | run 模式命令；改成 `ai-factory-agent codex` 即启用委托模式（§2.9） |
-| `agent.smokeCommand`       | `cat >/tmp/ai-factory-agent-prompt.txt` | smoke 模式命令（no-op，不调 LLM）                           |
-| `agent.validationCommands` | `[]`                                    | 验证命令；留空跳过验证直接建 PR                                  |
-| `agent.name`               | `builder`                               | agent 名称                                           |
-
-**sandbox / 服务暴露**
-
-| 参数路径                       | 默认值                           | 说明           |
-| -------------------------- | ----------------------------- | ------------ |
-| `sandbox.warmPoolReplicas` | `2`                           | 预热沙箱副本数      |
-| `sandbox.containerName`    | `dev`                         | 沙箱容器名        |
-| `sandbox.image.*`          | `coding-agent-sandbox:latest` | 沙箱镜像         |
-| `service.type`             | `NodePort`                    | 服务暴露方式       |
-| `service.nodePort`         | `32519`                       | NodePort 端口号 |
-
-**openai（scripted 模式三段式参数，对应 `OPENAI_*` 环境变量）**
-
-| 参数路径                          | 默认值                         | 说明                        |
-| ----------------------------- | --------------------------- | ------------------------- |
-| `openai.baseUrl`              | `https://api.openai.com/v1` | OpenAI 兼容 API 地址          |
-| `openai.model`                | `gpt-4.1`                   | 模型名                       |
-| `openai.temperature`          | `1`                         | 温度；偏确定性任务建议 0.2~0.4       |
-| `openai.maxTokens`            | `48000`                     | 单次响应最大 token（非上下文窗口）      |
-| `openai.maxToolRounds`        | `40`                        | tool-exploration 轮次上限     |
-| `openai.maxFinalScriptRounds` | `5`                         | final-script 重试上限         |
-| `openai.maxRepairRounds`      | `3`                         | 脚本运行失败后的修复轮数上限            |
-| `openai.totalTimeoutSeconds`  | `1800`                      | 整个 agent 运行的全局截止时间（秒）     |
-| `openai.visionEnabled`        | `true`                      | 是否把 issue 里的图片作为多模态输入传给模型 |
-
-**codex（delegated 模式，可选，默认关闭）**
-
-| 参数路径                       | 默认值          | 说明                                                                                                 |
-| -------------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
-| `codex.authSecretName`     | `""`         | 存 `auth.json` 的 Secret（§2.3）；走 ChatGPT 登录时设置                                                       |
-| `codex.model`              | `""`         | 传给 `codex exec --model` 的模型覆盖；空 = 用 config.toml / auth.json 默认                                     |
-| `codex.plugin.source`      | `""`         | Codex marketplace 源（`owner/repo` / https git URL / 本地路径）；推荐 `Verdure-oss/ai-factory-codex-plugins` |
-| `codex.plugin.name`        | `issue-fix`  | 插件名                                                                                                |
-| `codex.plugin.marketplace` | `ai-factory` | 市场名（同 marketplace.json 的 `name`）                                                                   |
-| `codex.plugin.ref`         | `main`       | git ref                                                                                            |
-
-**provider（GitHub / GitLab）**
-
-| 参数路径                         | 默认值          | 说明                                         |
-| ---------------------------- | ------------ | ------------------------------------------ |
-| `gitProvider`                | `""`（必填）     | `github` 或 `gitlab`；chart 安装时强校验，不设直接 fail |
-| `github.token`               | `""`         | GitHub PAT（也可走 Secret）                     |
-| `github.forkOwner`           | `""`         | Fork PR 工作流的所有者（§3.5）                      |
-| `github.repositoryAllowList` | `[]`         | 允许触发的 owner/repo 白名单（逗号分隔）                 |
-| `gitlab.token`               | `""`         | GitLab PAT（gitlab 模式必填）                    |
-| `gitlab.apiBase`             | `""`         | GitLab API 基址覆盖（须含 `/api/v4` 后缀）           |
-| `namespace`                  | `ai-factory` | 部署命名空间                                     |
 
 ### 2.5 配置 Webhook
 
@@ -377,13 +344,6 @@ Webhook 需要在**目标仓库**上配置（ai-factory 处理的仓库），分
 
 **② 机器人账号需要至少 Triage 权限** — ai-factory 用 `GITHUB_TOKEN` 对应的账号执行：读取 Issue、给 Issue 打状态标签、回帖评论。这些操作要求该账号被添加为目标仓库的协作者，并授予至少 **Triage** 权限：
 
-| 权限     | 能做什么                        | 是否满足 ai-factory |
-| ------ | --------------------------- | --------------- |
-| Read   | 读仓库、开/评论 Issue              | ❌               |
-| Triage | Read + 管理 Issue 标签、关闭 Issue | ✅ 最低要求          |
-| Write  | Triage + 直接推分支、建 PR         | ✅ 直推时需要         |
-| Admin  | Write + 管理 Webhook          | ✅               |
-
 添加方式：目标仓库 → `Settings → Collaborators and teams → Add people` → 输入机器人账号 → 选择对应权限。
 
 > **Fork 场景**：向公共仓库提 PR 时，上游只需 **Triage**（用于评论/打标签/读）；PR 通过自己的 fork 提交，不需要上游 Write。
@@ -392,30 +352,16 @@ Webhook 需要在**目标仓库**上配置（ai-factory 处理的仓库），分
 
 在目标仓库 `Settings → Webhooks → Add webhook` 填写：
 
-| 配置项          | 值                                         |
-| ------------ | ----------------------------------------- |
-| Payload URL  | `http://your-service/webhook/github`      |
-| Content type | `application/json`                        |
-| Secret       | 部署时设置的 `WEBHOOK_SECRET`                   |
-| Events       | **Issues**、**Check run**、**Check suites** |
+| 配置项          | 值                                                                      |
+| ------------ | ---------------------------------------------------------------------- |
+| Payload URL  | `http://<你的服务地址>:32519/webhook/github`（服务默认 NodePort 32519，暴露方式见 §2.6） |
+| Content type | `application/json`                                                     |
+| Secret       | 部署时设置的 `WEBHOOK_SECRET`                                                |
+| Events       | **Issues**、**Check run**、**Check suites**                              |
 
-> ⚠️ **重要：Events 必须选 "Issues"，不要选 "Labels"**
-> 
-> - **"Issues"** 事件会推送 issue 生命周期（含 `labeled` 打标签动作），服务端只响应 `labeled`，其余 action 静默忽略
-> - **"Labels"** 事件只在"标签本身被创建/编辑/删除"时触发，且 payload **不含 issue 信息**，服务端无法据此创建任务
-> 
-> **触发方式**：先创建 Issue，打上`ai-factory`、 `ai-factory-run` 标签触发ai-factory 工作。
+> **触发方式**：先创建 Issue，打上`ai-factory`、 `ai-factory-run` 标签触发ai-factory 工作。 
 
-### 2.6 暴露服务供 Webhook 调用
-
-如果你的 VM 没有公网 IP，GitHub 无法直接访问，需要以下方案之一：
-
-| 方案           | 公网 IP | HTTPS | 适合场景   |
-| ------------ | ----- | ----- | ------ |
-| **NodePort** | ✅     | ❌     | 有云服务器时 |
-| **Ingress**  | ✅     | ✅     | 生产环境推荐 |
-
-### 2.7 热更新配置
+### 2.6 热更新配置
 
 `ai-factory.env` 是唯一配置入口。修改后运行 `update-config.sh`，脚本会自动完成：
 
@@ -432,16 +378,7 @@ vim ai-factory.env
 ./scripts/update-config.sh
 ```
 
-**生效方式分两类：**
-
-| 目标                       | 生效方式                                                                      |
-| ------------------------ | ------------------------------------------------------------------------- |
-| `ai-factory-server`      | Secret/ConfigMap 以文件挂载，K8s 约 30s 自动同步，**无需重启**（`MAX_CONCURRENT_TASKS` 除外） |
-| go-dev 预热 pod            | env 是创建时快照，**必须重建**（脚本已自动删除，agent-sandbox 会自动补建）                          |
-
-> ⚠️ 若某个 go-dev 正被任务绑定，重建会中断该任务，建议在空闲时执行。
-
-### 2.8 卸载 / 回滚
+### 2.7 卸载 / 回滚
 
 ```bash
 # 卸载 Helm release（保留 namespace 和 CRD）
@@ -452,86 +389,40 @@ kubectl delete namespace ai-factory
 
 # 如需清理 FactoryTask CRD
 kubectl delete crd factorytasks.factory.ai.gke.io
+
+# 清理 agent-sandbox 控制器（独立命名空间）
+kubectl delete namespace agent-sandbox-system
+
+# 清理 agent-sandbox CRD
+kubectl delete crd sandboxes.agents.x-k8s.io
+kubectl delete crd sandboxclaims.extensions.agents.x-k8s.io
+kubectl delete crd sandboxtemplates.extensions.agents.x-k8s.io
+kubectl delete crd sandboxwarmpools.extensions.agents.x-k8s.io
 ```
 
 ---
 
-### 2.9 Codex 委派模式（delegated，可选）
+### 2.8 Codex 委派模式（delegated，可选）
 
-默认的 `scripted` 模式是"LLM 出脚本、控制器做 git/PR/CI"。**委派模式**则把整套流程交给沙箱里预装的 **Codex CLI**：改码 → 本地跑 CI → commit → push → 开 PR/MR 全由 Codex 依照一份**外部可编辑的工作流 skill**（`SKILL.md`）自主完成，控制器只负责受理、clone、注入 token、拉起 Codex、读取结果。
-
-**核心原则**：引擎（怎么起 Codex）与流程（做哪些步骤）彻底分层 —— 配一次引擎，随时改 skill，不必改 Go 代码或重建镜像。
+默认的 `scripted` 模式是"LLM 出脚本、控制器做 git/PR/CI"。**委派模式**则把整套流程交给沙箱里预装的 **Codex** **CLI**：改码 → 本地跑 CI → commit → push → 开 PR/MR 全由 Codex 依照一份**外部可编辑的工作流 skill**自主完成，控制器只负责受理、clone、注入 token、拉起 Codex、读取结果。
 
 #### ① 启用
 
-把 `agent.command` 改成：
+在环境变量`ai-factory.env`中把 `agent.command` 改成：ai-factory-agent codex
 
-```
+```Plain
 agent.command: "ai-factory-agent codex"
 ```
 
 （对应 `ai-factory.env` 的 `AGENT_COMMAND="ai-factory-agent codex"`）。webhook 检测到命令含 `codex` 即自动置为 `delegated`；控制器会**跳过** validation / commit / push / 建 PR / CI 修复等步骤。
 
-#### ② 登录 / 接入模型（二选一）
+#### ②工作流
 
-**方式 A：ChatGPT 账号（auth.json）** —— 本地先 `codex login`，再把生成的 `auth.json` 挂进沙箱：
+skill 规范codex的处理的流程，描述 Codex 该怎么做。
 
-```bash
-kubectl -n ai-factory create secret generic codex-auth \
-  --from-file=auth.json=$HOME/.codex/auth.json
-helm upgrade --install ai-factory ./dist/ai-factory-*.tgz \
-  -n ai-factory --set codex.authSecretName=codex-auth
-```
+在ai-factory.env中配置好插件仓库，例如`Verdure-oss/ai-factory-codex-plugins`，agent 在每个任务开始时执行 `codex plugin marketplace add` → `marketplace upgrade` → `plugin add`，所以**改插件 →** **push** **→ 下个任务自动生效**，无需重建镜像或 go-dev pod。
 
-**方式 B：第三方 OpenAI 兼容网关（推荐，无需 auth.json）** —— 只要 `OPENAI_BASE_URL` 指向**非** `api.openai.com` 的兼容网关且 `OPENAI_API_KEY` 已设置，沙箱会在每次任务开始时**自动生成** `~/.codex/config.toml`，Codex 即通过该网关运行：
-
-- 模型名默认取 `OPENAI_MODEL`，也可设 `CODEX_MODEL` 单独指定
-- `CODEX_WIRE_API` 默认 `responses`；网关只支持 `/v1/chat/completions` 而无 `/v1/responses` 时设 `chat`
-- 设 `AI_FACTORY_CODEX_SKIP_CONFIG=1` 可跳过生成、保留 auth.json 登录方式
-- 已存在的 operator 配置 `~/.codex/config.toml` 会被尊重（不覆盖）
-
-#### ③ 工作流 skill（推荐：Codex 插件 marketplace，push 即生效）
-
-skill 是委托模式的"剧本"，描述 Codex 该怎么做。通过 **Codex 插件 marketplace** 投递：
-
-```bash
-helm upgrade --install ai-factory ./dist/ai-factory-*.tgz \
-  -n ai-factory --set codex.plugin.source=Verdure-oss/ai-factory-codex-plugins
-```
-
-插件仓 `Verdure-oss/ai-factory-codex-plugins` 是与主仓解耦的**独立仓库**，`plugins/issue-fix/skills/` 下含**编排 skill `issue-fix`** 与 **builder / reviewer 角色 skill**：`issue-fix` 规划任务后派发 builder 实现、reviewer 审查，再自行 commit / push / 开 PR。agent 在每个任务开始时执行 `codex plugin marketplace add` → `marketplace upgrade` → `plugin add`，所以**改插件 → push → 下个任务自动生效**，无需重建镜像或 go-dev pod。
-
-| 环境变量                                | 默认值          | 说明                                      |
-| ----------------------------------- | ------------ | --------------------------------------- |
-| `AI_FACTORY_CODEX_PLUGIN_SOURCE`    | 空（= 关闭插件）    | 市场源：`owner/repo` / https git URL / 本地路径 |
-| `AI_FACTORY_CODEX_PLUGIN_NAME`      | `issue-fix`  | 插件名                                     |
-| `AI_FACTORY_CODEX_MARKETPLACE_NAME` | `ai-factory` | 市场名（同 marketplace.json 的 `name`）        |
-| `AI_FACTORY_CODEX_PLUGIN_REF`       | `main`       | git ref                                 |
-| `AI_FACTORY_CODEX_SKIP_PLUGIN`      | 空            | 设 `1` 跳过注册（排障/离线用）                      |
-
-> ⚠️ **插件注册依赖 git 代理**：沙箱直连 `github.com` 不稳定，任务态的 `AI_FACTORY_GIT_PROXY` `insteadOf` 改写是**必需依赖**（把 Codex 的 clone 导向代理镜像）。务必配置 `gitProxy`（§2.4），且不要绕过该改写。注册失败时会自动回退到单文件 `SKILL.md`。
-
-#### ④ 结果回传
-
-Codex 完成后打印**恰好一行**结果标记，控制器据此更新任务状态并回帖：
-
-```
-__AI_FACTORY_RESULT__={"pr_url":"<url>","branch":"<branch>","summary":"<one sentence>"}
-```
-
-同时写 `/workspace/repo/.ai-factory/result-url.txt`（冗余兜底）。
-
-#### ⑤ 与 scripted 模式的差异
-
-| 维度            | scripted（默认）                  | delegated                 |
-| ------------- | ----------------------------- | ------------------------- |
-| 引擎            | 三段式 LLM 产出 shell 脚本           | Codex CLI + skill         |
-| commit / push | 控制器做                          | Codex 自己做                 |
-| 建 PR/MR       | 控制器调 GitHub/GitLab API        | Codex 用 `gh` / `glab`     |
-| 校验            | 控制器跑 `validationCommands`     | skill 本地预跑 CI（left-shift） |
-| CI 修复循环       | GitHub check webhook 驱动（§3.4） | 无（本地校验是近似，远程 CI 仍可能差异）    |
-| 脚本安全校验 / 预算   | 有（script_validation / 三段式预算）  | 不适用，靠 skill 安全护栏 + 输出脱敏   |
-| smoke 模式      | 不受影响                          | 不受影响（smoke 始终走 no-op 命令）  |
+> ⚠️ **插件注册依赖 git 代理**：沙箱直连 `github.com` 不稳定，任务态的 `AI_FACTORY_GIT_PROXY` `insteadOf` 改写是**必需依赖**（把 Codex 的 clone 导向代理镜像）。务必配置 `gitProxy`（§2.4），且不要绕过该改写。
 
 ---
 
@@ -658,40 +549,6 @@ GITHUB_REPOSITORY_ALLOWLIST=myorg/myrepo  # 可选：允许触发的仓库白名
 
 GitLab 与 GitHub **分开部署**：一个 server 实例只服务一个提供商，由 `GIT_PROVIDER` 环境变量指定（**必填**，值为 `github` 或 `gitlab`；不设置则启动即报错）。服务只挂载对应的 webhook 端点，另一个端点返回 404，从物理上杜绝误触发。
 
-#### 部署拓扑
-
-ai-factory 干活时是**主动连接** GitLab 的（clone / push / 建 MR / issue 回帖），因此 GitLab 模式的 server 必须部署在**能访问 GitLab 的内网**。自建 GitLab 无需公网入口——它只需能把 webhook 推给内网的 ai-factory，并被 ai-factory 反向访问。
-
-| 交互                       | 方向                  | 说明     |
-| ------------------------ | ------------------- | ------ |
-| Issue 打标签推 webhook       | GitLab → ai-factory | 内网互通即可 |
-| clone / push / 建 MR / 回帖 | ai-factory → GitLab | 内网互通即可 |
-| 调用 LLM                   | ai-factory → 公网     | 需要出网能力 |
-
-#### 配置步骤
-
-1. **配置凭证**：`ai-factory.env` 中设置
-   
-   ```
-   GIT_PROVIDER=gitlab
-   GITLAB_TOKEN=<Personal Access Token>   # 需要 api + write_repository 权限（api 覆盖 API 操作，write_repository 覆盖 git clone/push）
-   GITLAB_API_BASE=                       # 可选，见下
-   ```
-   
-   自建实例的 API 基址默认从项目 host 自动推导为 `https://<host>/api/v4`。仅当需要覆盖（例如反向代理改写了路径）时才设置 `GITLAB_API_BASE`，注意**必须包含 `/api/v4` 后缀**。
-
-2. **配置 Webhook**：目标 GitLab 项目 → `Settings → Webhooks → Add new webhook`
-   
-   | 配置项          | 值                                         |
-   | ------------ | ----------------------------------------- |
-   | URL          | `http://<ai-factory-内网地址>/webhook/gitlab` |
-   | Secret token | 部署时设置的 `WEBHOOK_SECRET`                   |
-   | Trigger      | 仅勾选 **Work item events**                  |
-   
-   > **只勾 Work item events**（旧版 UI 叫 "Issues events"）。它对应 GitHub 的 "Issues" 事件，涵盖 issue 的创建/更新/关闭/重开，其中包含标签变更。其余事件（Comments、Merge request events 等）都不需要。
-
-3. **触发**：给 issue 打上 `ai-factory` + `ai-factory-run` 标签。体验与 GitHub 完全一致——`running` / `waiting` / `done` / `failed` 状态标签实时反馈、移除触发标签可取消排队中的任务、自动创建 MR、issue 回帖汇报结果。
-
 > **委托模式同样支持 GitLab**：delegated 模式下（§2.9）Codex 用 `glab` 建 MR，工作流 skill 自带的 `references/gitlab.md` 提供对应命令配方；smoke 检查也会校验 `glab` 是否就位。
 
 #### 与 GitHub 的差异（已由 ai-factory 内部消化）
@@ -700,7 +557,8 @@ GitHub 的 "Issues" 事件在加标签时 `action=labeled`，payload 直接带�
 
 #### 暂不支持
 
-- **CI 失败自动修复**：GitLab pipeline 监听尚未实现（GitHub 的 Actions check 已支持）。GitLab 任务建完 MR 即视为成功。
+- **CI** **失败自动修复**：GitLab pipeline 监听尚未实现（GitHub 的 Actions check 已支持）。GitLab 任务建完 MR 即视为成功。
+
 - **Fork 工作流**：`GITHUB_FORK_OWNER` 仅对 GitHub 生效。
 
 ### 3.7 常用命令

@@ -96,7 +96,7 @@ dist/
 ├── ai-factory-*.tgz               # Helm chart
 ├── components/                    # CRD 安装脚本
 ├── deploy-remote.sh               # 远程部署脚本
-└── ai-factory.env.example         # 配置模板
+└── ai-factory.env         # 配置模板
 ```
 
 在服务器上部署（若打包机与服务器不是同一台，先传输：`rsync -avz dist/ user@your-vm:/opt/ai-factory/`）：
@@ -126,12 +126,12 @@ cd /opt/ai-factory/dist/
 
 ## 文档
 
-| 文档                                   | 说明                                                               |
-| ------------------------------------ | ---------------------------------------------------------------- |
-| [自托管部署指南](docs/self-hosted/guide.md) | ⭐ 完整的中文自托管部署 + 使用指南                                              |
-| [一般性设置指南](docs/general/guide.md)     | 从其他仓库消费 ai-factory（GitHub Actions + kind / GitLab Runner + kind） |
-| [Central AI Factory](docs/central/)  | 中央化共享实例部署相关                                                      |
-| [设计文档](docs/superpowers/)            | 各特性的设计规格（specs）与实施计划（plans）                                      |
+| 文档                                        | 说明                                                               |
+| ----------------------------------------- | ---------------------------------------------------------------- |
+| [ai-factory指南](docs/self-hosted/guide.md) | ⭐ 完整的中文ai-factory部署 + 使用指南                                       |
+| [一般性设置指南](docs/general/guide.md)          | 从其他仓库消费 ai-factory（GitHub Actions + kind / GitLab Runner + kind） |
+| [Central AI Factory](docs/central/)       | 中央化共享实例部署相关                                                      |
+| [设计文档](docs/superpowers/)                 | 各特性的设计规格（specs）与实施计划（plans）                                      |
 
 ## 仓库结构
 
